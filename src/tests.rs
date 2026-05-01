@@ -4389,4 +4389,44 @@ mod tests {
             println!("  avg cycles/insn: {:.3}", total_cycles as f64 / n_insns as f64);
         }
     }
+
+    #[test]
+    fn test_anguna_forced_blank_timing() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let frame_cycles = 280896u64;
+        let total_cycles = frame_cycles * 6;
+        let mut intr_wait_count = 0u32;
+        let mut forced_blank_clear_cycle = 0u64;
+        let mut forced_blank_cleared = false;
+
+        for cycle in 0..total_cycles {
+            let pc = gba.regs[15].wrapping_sub(if gba.cpsr & 0x20 != 0 { 4 } else { 8 });
+            let is_thumb = gba.cpsr & 0x20 != 0;
+
+            // Check for SWI #5 (VBlankIntrWait) - THUMB: SWI 0x05 = 0xDF05
+            if is_thumb {
+                let instr = gba.mem_read16(pc);
+                if instr == 0xDF05 {
+                    intr_wait_count += 1;
+                    println!("IntrWait #{} at cycle {} (frame {})", intr_wait_count, cycle, cycle / frame_cycles);
+                }
+            }
+
+            let old_dispcnt = gba.dispcnt;
+            gba.tick_one_cycle();
+
+            if !forced_blank_cleared && (old_dispcnt >> 7) & 1 != 0 && (gba.dispcnt >> 7) & 1 == 0 {
+                forced_blank_clear_cycle = cycle;
+                forced_blank_cleared = true;
+                println!("Forced blank cleared at cycle {} (frame {}, scanline {})",
+                    cycle, cycle / frame_cycles, (cycle % frame_cycles) / 1232);
+            }
+        }
+
+        if !forced_blank_cleared {
+            println!("Forced blank NOT cleared in 6 frames");
+        }
+        println!("Total IntrWait calls: {}", intr_wait_count);
+        let _ = forced_blank_clear_cycle;
+    }
 }
