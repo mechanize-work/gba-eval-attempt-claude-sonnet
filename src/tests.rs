@@ -3186,4 +3186,153 @@ mod tests {
             cycle += 1;
         }
     }
+
+    #[test]
+    fn test_meteorain_ring_buf_prime() {
+        // Test: if we prime the ring buffer (set tail = head - 16) right before
+        // the dark blue screen, does it produce 63 frames at ~145.8 cycles/iter?
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        // Run until dark blue screen starts (palette[0] == 0x0800)
+        let mut primed = false;
+        loop {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !primed {
+                // Prime the ring buffer: set tail = head - 16
+                let head = u32::from_le_bytes(gba.iram[0x12CC..0x12D0].try_into().unwrap());
+                let new_tail = head.wrapping_sub(16);
+                println!("Priming ring buffer at cycle {}: head={:#010x}, setting tail={:#010x}", gba.cycles, head, new_tail);
+                gba.iram[0x12D0..0x12D4].copy_from_slice(&new_tail.to_le_bytes());
+                primed = true;
+            }
+            if primed { break; }
+            gba.tick_one_cycle();
+        }
+
+        // Now run the dark blue screen test (from test_meteorain_search_iters logic)
+        let mut iter_count = 0u32;
+        let mut total_cycles: u64 = 0;
+        let mut start_cycle = gba.cycles;
+        let mut in_loop = false;
+        let mut last_pal0_debug: u16 = 0xFFFF;
+        let mut debug_ticks: u64 = 0;
+
+        for _ in 0..(30_000_000u64 * 4) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+
+            if pal0 != last_pal0_debug {
+                println!("[PAL_CHANGE] cycle={} pal0={:04X}->{:04X} in_loop={}", gba.cycles, last_pal0_debug, pal0, in_loop);
+                last_pal0_debug = pal0;
+            }
+
+            if pal0 == 0x0800 {
+                if !in_loop {
+                    in_loop = true;
+                    start_cycle = gba.cycles;
+                    println!("[LOOP_START] cycle={}", gba.cycles);
+                }
+                if gba.cpu_cycles_remaining == 0 && !gba.halted && (gba.cpsr & 0x20) != 0 {
+                    let pc = gba.regs[15].wrapping_sub(4);
+                    if pc == 0x08016FD2 {
+                        iter_count += 1;
+                        total_cycles = gba.cycles - start_cycle;
+                        if iter_count <= 3 {
+                            println!("[ITER] #{} cycle={}", iter_count, gba.cycles);
+                        }
+                    }
+                    // Debug: sample every 50k cycles in loop
+                    if in_loop && (gba.cycles - start_cycle) % 500_000 < 2 {
+                        let is_thumb = (gba.cpsr & 0x20) != 0;
+                        let pc_r = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                        println!("[SAMPLE] cycle={} pc={:#010x} halted={} remaining={}",
+                            gba.cycles, pc_r, gba.halted, gba.cpu_cycles_remaining);
+                    }
+                }
+            } else if in_loop {
+                println!("[LOOP_END] cycle={} after {} iters", gba.cycles, iter_count);
+                break;
+            }
+
+            debug_ticks += 1;
+            if debug_ticks > 10_000_000 && !in_loop {
+                println!("[TIMEOUT] No dark blue after 10M ticks from prime point");
+                break;
+            }
+
+            gba.tick_one_cycle();
+        }
+
+        let avg = if iter_count > 0 { total_cycles as f64 / iter_count as f64 } else { 0.0 };
+        println!("Dark blue frames: {}", iter_count);
+        println!("Total cycles: {}", total_cycles);
+        println!("Avg cycles/iter: {:.1}", avg);
+    }
+
+    #[test]
+    fn test_meteorain_audio_init_trace() {
+        // Trace the call stack just before cycle 3958791 when 0x0801A43E writes struct+84.
+        // We want to see what PUSH (function entries) precede this write.
+        // Track the last 500 PUSH instructions (which mark function entries) before the write.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut cycle: u64 = 0;
+        let target_cycle: u64 = 3_958_791;
+        let look_back: u64 = 300_000;
+        let mut recent_pcs: std::collections::VecDeque<(u64, u32, bool)> = std::collections::VecDeque::new();
+
+        while cycle < target_cycle + 100 {
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                // Only record when in ROM
+                if pc >= 0x08000000 {
+                    recent_pcs.push_back((cycle, pc, is_thumb));
+                    if recent_pcs.len() > 100_000 {
+                        recent_pcs.pop_front();
+                    }
+                }
+
+                // Check if we're at the write site
+                if cycle >= target_cycle - 2 && cycle <= target_cycle + 2 {
+                    println!("[AT_WRITE] cycle={} PC={:#010x}", cycle, pc);
+                }
+            }
+
+            gba.tick_one_cycle();
+            cycle += 1;
+        }
+
+        // Find and print unique function entries (PUSH with LR) in the look-back window
+        let start_cycle = if target_cycle > look_back { target_cycle - look_back } else { 0 };
+        println!("\n=== Function entries (PUSH..LR) in cycles {}-{} ===", start_cycle, target_cycle);
+        let mut seen_fns = std::collections::HashSet::new();
+        for (cyc, pc, _) in &recent_pcs {
+            if *cyc < start_cycle { continue; }
+            // Check if this PC is a PUSH...LR instruction in ROM
+            let off = (*pc as usize).wrapping_sub(0x08000000);
+            if off + 2 <= gba.rom.len() {
+                let h = u16::from_le_bytes([gba.rom[off], gba.rom[off+1]]);
+                if (h >> 9) == 0b1011010 && (h & 0x100) != 0 {
+                    if seen_fns.insert(*pc) {
+                        println!("  cycle={} fn_entry={:#010x}", cyc, pc);
+                    }
+                }
+            }
+        }
+
+        // Also print the last 100 unique ROM PCs before the write
+        println!("\n=== Last 100 ROM instructions before write ===");
+        let before_write: Vec<_> = recent_pcs.iter()
+            .filter(|(c,_,_)| *c < target_cycle)
+            .rev()
+            .take(100)
+            .collect();
+        let mut seen2 = std::collections::HashSet::new();
+        for (cyc, pc, _) in before_write.iter().rev() {
+            if seen2.insert(*pc) {
+                println!("  cycle={} pc={:#010x}", cyc, pc);
+            }
+        }
+    }
 }
