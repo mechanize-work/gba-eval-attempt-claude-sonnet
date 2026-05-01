@@ -495,7 +495,9 @@ impl Gba {
 
     // Direct VRAM/palette/OAM access (faster path, no banking)
     pub(crate) fn vram_read8(&self, addr: usize) -> u8 {
-        self.vram[addr & 0x17FFF]
+        let off = addr & 0x1FFFF;
+        let off = if off >= 0x18000 { off - 0x8000 } else { off };
+        self.vram[off]
     }
 
     pub(crate) fn vram_read16(&self, addr: usize) -> u16 {

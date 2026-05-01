@@ -266,6 +266,108 @@ mod tests {
     }
 
     #[test]
+    fn test_row0_debug() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        for _ in 0..3 { gba.run_frame(); }
+
+        // Check VRAM state BEFORE frame 4
+        let bgcnt2 = gba.bgcnt[2];
+        let map_base = (((bgcnt2 >> 8) & 0x1F) as usize) * 0x800;
+        println!("BEFORE frame 4: BGCNT2={:04X} map_base=0x{:X}", bgcnt2, map_base);
+        println!("Row 0 map before frame 4: {:?}", &gba.vram[map_base..map_base+20]);
+        // Print first non-zero map entry to see the structure
+        let first_nonzero = (0..1024).find(|&i| gba.vram[map_base + i*2] != 0 || gba.vram[map_base + i*2 + 1] != 0);
+        println!("First non-zero map entry at index: {:?}", first_nonzero);
+
+        gba.run_frame();
+
+        // Check what's in VRAM at the map and tile addresses for BG2 row 0
+        let bgcnt2 = gba.bgcnt[2];
+        let char_base = (((bgcnt2 >> 2) & 3) as usize) * 0x4000;
+        let map_base = (((bgcnt2 >> 8) & 0x1F) as usize) * 0x800;
+        println!("BGCNT2={:04X} char_base=0x{:X} map_base=0x{:X}", bgcnt2, char_base, map_base);
+        println!("bghofs[2]={} bgvofs[2]={}", gba.bghofs[2], gba.bgvofs[2]);
+
+        // Check map entries for row 0
+        println!("Map entries for y=0 row (first 10 tiles):");
+        for tx in 0..10usize {
+            let off = map_base + (0 * 32 + tx) * 2;
+            let entry = gba.vram[off] as u16 | ((gba.vram[off+1] as u16) << 8);
+            let tile_num = entry & 0x3FF;
+            println!("  tx={} off=0x{:X} entry={:04X} tile={}", tx, off, entry, tile_num);
+        }
+
+        // Check VRAM bytes at map_base
+        println!("First 16 bytes at map_base (0x{:X}): {:?}", map_base, &gba.vram[map_base..map_base+16]);
+
+        // Check tile 0 data
+        println!("Tile 0 at char_base (0x{:X}): first 16 bytes = {:?}", char_base, &gba.vram[char_base..char_base+16]);
+
+        // Check frame 3 pixel at (0,0)
+        let fb = &gba.framebuffer;
+        let px = fb[0];
+        println!("Framebuffer pixel (0,0) = 0x{:08X}", px);
+        println!("Framebuffer pixels 0-15 at row 0:");
+        for x in 0..16 {
+            let p = fb[x];
+            let r = (p & 0xFF) as u8;
+            let g = ((p >> 8) & 0xFF) as u8;
+            let b = ((p >> 16) & 0xFF) as u8;
+            print!("  x={}: #{:02X}{:02X}{:02X}", x, r, g, b);
+        }
+        println!();
+
+        // Check if BGHOFS/BGVOFS is being written to by game
+        println!("Scroll: hofs={} vofs={}", gba.bghofs[2], gba.bgvofs[2]);
+
+        // Search for the mysterious 0x00E4 color in palette
+        println!("Searching for GBA color 0x00E4 in all palette RAM:");
+        for i in 0..512usize {
+            let lo = gba.palette[i*2];
+            let hi = gba.palette[i*2 + 1];
+            let c = lo as u16 | ((hi as u16) << 8);
+            if c == 0x00E4 {
+                if i < 256 {
+                    println!("  Found at BG palette[{}]", i);
+                } else {
+                    println!("  Found at OBJ palette[{}]", i - 256);
+                }
+            }
+        }
+
+        // Also check if any tile in VRAM has non-zero data that could cause row 0 pixels
+        // We know map row 0 is all tile 0, and tile 0 is all zeros. BUT let's check
+        // if maybe the SCROLL is non-zero somehow during rendering.
+        // Print ALL BG2 registers including actual register reads
+        println!("BG2 BGCNT: 0x{:04X}", gba.bgcnt[2]);
+        println!("BG2 HOFS: {} VOFS: {}", gba.bghofs[2], gba.bgvofs[2]);
+
+        // Check OBJ VRAM tile 0 (at 0x10000)
+        println!("OBJ VRAM tile 0 (4bpp, at 0x10000): first 32 bytes = {:?}", &gba.vram[0x10000..0x10020]);
+
+        // Check OAM entries 20-25
+        println!("OAM entries 20-25:");
+        for i in 20..26usize {
+            let attr0 = gba.oam[i*8] as u16 | ((gba.oam[i*8+1] as u16) << 8);
+            let attr1 = gba.oam[i*8+2] as u16 | ((gba.oam[i*8+3] as u16) << 8);
+            let attr2 = gba.oam[i*8+4] as u16 | ((gba.oam[i*8+5] as u16) << 8);
+            println!("  OAM[{}]: attr0={:04X} attr1={:04X} attr2={:04X}", i, attr0, attr1, attr2);
+        }
+
+        // Check the OBJ palette entry 0 for palette 0
+        println!("OBJ palette entry 0 (for palette 0): {:04X}", gba.palette[0x200] as u16 | ((gba.palette[0x201] as u16) << 8));
+        // Check a few OBJ palette entries
+        for i in 0..16usize {
+            let lo = gba.palette[0x200 + i*2];
+            let hi = gba.palette[0x200 + i*2 + 1];
+            let c = lo as u16 | ((hi as u16) << 8);
+            if c != 0 {
+                println!("  OBJ pal[{}] = {:04X}", i, c);
+            }
+        }
+    }
+
+    #[test]
     fn test_vram_analysis() {
         let mut gba = make_gba("/task/dev-roms/anguna.gba");
         for _ in 0..3 { gba.run_frame(); }
