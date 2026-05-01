@@ -4062,6 +4062,27 @@ mod tests {
     }
 
     #[test]
+    fn test_init_timing_all() {
+        // Check forced blank clear timing for all ROMs
+        for (name, rom) in [
+            ("anguna", "/task/dev-roms/anguna.gba"),
+            ("trogdor", "/task/dev-roms/trogdor.gba"),
+            ("xniq", "/task/dev-roms/xniq.gba"),
+        ] {
+            let mut gba = make_gba(rom);
+            for _ in 0..(280896u32 * 15) {
+                let old_dc = gba.dispcnt;
+                gba.tick_one_cycle();
+                if (old_dc & 0x80) != 0 && (gba.dispcnt & 0x80) == 0 {
+                    println!("{}: Forced blank cleared at cycle {} = frame {:.2}",
+                        name, gba.cycles, gba.cycles as f64 / 280896.0);
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_anguna_init_flow() {
         // Trace every unique PC in the first 280K cycles to understand init
         let mut gba = make_gba("/task/dev-roms/anguna.gba");
@@ -4097,37 +4118,30 @@ mod tests {
     }
 
     #[test]
-    fn test_anguna_ewram_speed() {
-        // Profile how fast the fill loop actually runs with current timing
-        // and compare with expected oracle timing
+    fn test_anguna_palette_writes() {
+        // Find when anguna first writes to palette RAM (0x05000000-0x050003FF)
         let mut gba = make_gba("/task/dev-roms/anguna.gba");
-        let mut fill_start = 0u64;
-        let mut fill_end = 0u64;
-        let mut in_fill = false;
-        let mut iter_count = 0u64;
+        let mut pal_written = false;
 
         for _ in 0..(280896u32 * 6) {
-            let is_thumb = (gba.cpsr & 0x20) != 0;
-            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            let old_pal0 = u16::from_le_bytes([gba.palette[0], gba.palette[1]]);
+            gba.tick_one_cycle();
+            let new_pal0 = u16::from_le_bytes([gba.palette[0], gba.palette[1]]);
 
-            if pc == 0x08000190 {
-                if !in_fill {
-                    in_fill = true;
-                    fill_start = gba.cycles as u64;
-                }
-                iter_count += 1;
-            } else if in_fill && pc != 0x08000190 {
-                fill_end = gba.cycles as u64;
-                in_fill = false;
-                println!("Fill loop: {} iterations, {} cycles, {:.1} cycles/iter",
-                    iter_count, fill_end - fill_start,
-                    (fill_end - fill_start) as f64 / iter_count as f64);
-                println!("  Oracle needs ~280000 cycles for 1 frame");
-                println!("  Oracle cycles/iter would be: {:.1}", 280000.0f64 / iter_count as f64);
-                break;
+            if new_pal0 != old_pal0 && !pal_written {
+                pal_written = true;
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("Palette[0] changed at cycle {} (PC={:08X}): {:04X} -> {:04X}",
+                    gba.cycles, pc, old_pal0, new_pal0);
+                println!("  DISPCNT={:04X} frame={}", gba.dispcnt, gba.cycles / 280896);
             }
 
-            gba.tick_one_cycle();
+            // Also check if ALL palette changes within first 2 frames
+            if gba.cycles > 280896 * 2 { break; }
+        }
+        if !pal_written {
+            println!("No palette writes in first 2 frames!");
         }
     }
 }
