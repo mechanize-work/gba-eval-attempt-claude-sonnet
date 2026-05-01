@@ -724,4 +724,31 @@ mod tests {
         println!("Final palette[0..16]: {:?}", &gba.palette[0..16]);
         println!("DISPCNT={:04X} BGCNT[2]={:04X}", gba.dispcnt, gba.bgcnt[2]);
     }
+
+
+    #[test]
+    fn test_meteorain_loop_trace() {
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        // Sample PC values during startup (first 10 frames)
+        let mut pc_counts: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+
+        for cycle in 0..(280896u32 * 10) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            if cycle % 100 == 0 {
+                *pc_counts.entry(pc).or_insert(0) += 1;
+            }
+
+            gba.tick_one_cycle();
+        }
+
+        let mut entries: Vec<(u32, u64)> = pc_counts.into_iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("Top PCs during meteorain startup:");
+        for (pc, count) in entries.iter().take(15) {
+            println!("  PC=0x{:08X}: samples={}", pc, count);
+        }
+    }
 }
