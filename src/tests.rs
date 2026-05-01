@@ -2028,6 +2028,246 @@ mod tests {
     }
 
     #[test]
+    fn test_meteorain_full_irq_cost() {
+        // Measure total IRQ handling cost broken down by phase:
+        //   Phase 1: BIOS handler (ARM, IRQ mode, BIOS address space)
+        //   Phase 2: Game ISR (Thumb, SYS mode, IRAM)
+        //   Phase 3: BIOS return (ARM, various modes)
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut dark_blue_found = false;
+        let mut in_irq = false;
+        let mut irq_start_cycle = 0u64;
+        let mut bios_cycles = 0u64;  // in BIOS ARM handler (mode=IRQ)
+        let mut isr_cycles = 0u64;   // in game ISR (IRAM)
+        let mut other_cycles = 0u64; // BIOS epilogue (SYS, BIOS addr)
+        let mut rom_isr_cycles = 0u64; // ROM code called from ISR
+        let mut irq_count = 0u32;
+        let mut total_irq_cycles = 0u64;
+        let mut phase_bios = 0u64;
+        let mut phase_isr = 0u64;
+        let mut phase_other = 0u64;
+        let mut phase_rom = 0u64;
+        let mut last_cycle = 0u64;
+        let mut last_phase = 0u8; // 1=bios, 2=isr, 3=other(bios-epi), 4=rom
+
+        for _ in 0..(30_000_000u64 * 3) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !dark_blue_found {
+                dark_blue_found = true;
+            }
+
+            if dark_blue_found && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let mode = gba.cpsr & 0x1F;
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                if !in_irq && mode == 0x12 {
+                    in_irq = true;
+                    irq_start_cycle = gba.cycles;
+                    last_cycle = gba.cycles;
+                    phase_bios = 0;
+                    phase_isr = 0;
+                    phase_other = 0;
+                    phase_rom = 0;
+                    last_phase = 1; // entering BIOS handler
+                }
+
+                if in_irq {
+                    // Classify current instruction phase
+                    let cur_phase = if mode == 0x12 {
+                        1u8 // BIOS ARM handler (IRQ mode)
+                    } else if (pc >> 24) == 0x03 {
+                        2u8 // game ISR (IRAM, any mode)
+                    } else if pc < 0x4000 {
+                        3u8 // BIOS epilogue in SYS mode
+                    } else {
+                        4u8 // ROM/other code called from ISR
+                    };
+
+                    // Accumulate cycles for the phase we WERE in
+                    let elapsed = gba.cycles - last_cycle;
+                    match last_phase {
+                        1 => phase_bios += elapsed,
+                        2 => phase_isr += elapsed,
+                        3 => phase_other += elapsed,
+                        _ => phase_rom += elapsed,
+                    }
+                    last_phase = cur_phase;
+                    last_cycle = gba.cycles;
+
+                    // Detect IRQ return: Thumb code back in ROM loop
+                    if is_thumb && (pc >= 0x08016FD0 && pc <= 0x08017010) {
+                        let remaining = gba.cycles - last_cycle;
+                        // count as "other" (BIOS epilogue)
+                        phase_other += remaining;
+
+                        in_irq = false;
+                        let irq_cycles = gba.cycles - irq_start_cycle;
+                        total_irq_cycles += irq_cycles;
+                        bios_cycles += phase_bios;
+                        isr_cycles += phase_isr;
+                        other_cycles += phase_other;
+                        rom_isr_cycles += phase_rom;
+                        irq_count += 1;
+                        if irq_count <= 5 {
+                            println!("IRQ #{}: total={} bios={} isr={} bios_epi={} rom_isr={} (PC={:08X})",
+                                irq_count, irq_cycles, phase_bios, phase_isr, phase_other, phase_rom, pc);
+                        }
+                        if irq_count == 200 {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+
+        if irq_count > 0 {
+            println!("After {} IRQs:", irq_count);
+            println!("  avg total:    {:.1} cyc/IRQ", total_irq_cycles as f64 / irq_count as f64);
+            println!("  avg bios:     {:.1} cyc/IRQ (ARM IRQ handler in IRQ mode)", bios_cycles as f64 / irq_count as f64);
+            println!("  avg isr:      {:.1} cyc/IRQ (IRAM code, SYS/other mode)", isr_cycles as f64 / irq_count as f64);
+            println!("  avg bios_epi: {:.1} cyc/IRQ (BIOS epilogue, SYS mode)", other_cycles as f64 / irq_count as f64);
+            println!("  avg rom_isr:  {:.1} cyc/IRQ (ROM code called from ISR)", rom_isr_cycles as f64 / irq_count as f64);
+        }
+    }
+
+    #[test]
+    fn test_meteorain_isr_rom_trace() {
+        // Trace the ROM code called from the game ISR to understand the ~300-cycle overhead
+        // The ISR at 0x03000FD8 apparently calls ROM code before returning
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut dark_blue_found = false;
+        let mut in_irq = false;
+        let mut irq_count = 0u32;
+        let mut tracing_rom = false;
+        let mut rom_trace: Vec<(u32, u32, u32)> = Vec::new(); // (pc, encoding, stall_cycles)
+
+        for _ in 0..(30_000_000u64 * 3) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !dark_blue_found {
+                dark_blue_found = true;
+            }
+
+            if dark_blue_found && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let mode = gba.cpsr & 0x1F;
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                if !in_irq && mode == 0x12 {
+                    in_irq = true;
+                    irq_count += 1;
+                    tracing_rom = false;
+                }
+
+                if in_irq {
+                    // Start tracing when we enter ROM (from ISR, not BIOS handler)
+                    let in_rom = (pc >> 24) >= 0x08 && (pc >> 24) <= 0x0D;
+                    let in_bios = pc < 0x4000;
+                    let in_iram = (pc >> 24) == 0x03;
+
+                    if !in_bios && !in_iram && in_rom && irq_count == 2 {
+                        // Second IRQ, ROM code from ISR
+                        tracing_rom = true;
+                    }
+
+                    if tracing_rom && in_rom && irq_count == 2 && rom_trace.len() < 100 {
+                        let enc = if is_thumb {
+                            gba.mem_read16(pc) as u32
+                        } else {
+                            gba.mem_read32(pc)
+                        };
+                        gba.tick_one_cycle();
+                        rom_trace.push((pc, enc, gba.stall_cycles));
+                        while gba.cpu_cycles_remaining > 0 { gba.tick_one_cycle(); }
+                        continue;
+                    }
+
+                    // Detect IRQ return: Thumb code back in ROM loop
+                    if is_thumb && (pc >= 0x08016FD0 && pc <= 0x08017010) {
+                        in_irq = false;
+                        tracing_rom = false;
+                        if irq_count == 2 && !rom_trace.is_empty() {
+                            let total_cyc: u32 = rom_trace.iter().map(|(_, _, c)| c).sum();
+                            println!("ISR ROM trace: {} instructions, {} cycles", rom_trace.len(), total_cyc);
+                            for (rpc, enc, cyc) in &rom_trace {
+                                let mode_char = if enc >> 16 != 0 { 'A' } else { 'T' };
+                                println!("  {:08X} {:04X} {} cyc{}", rpc, enc, cyc, mode_char);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_meteorain_full_isr_trace() {
+        // Trace every instruction during a typical Timer1 IRQ to map the complete ISR execution
+        // This will show whether our ISR is taking a different code path than oracle (different game state)
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut dark_blue_found = false;
+        let mut in_irq = false;
+        let mut irq_count = 0u32;
+        let mut trace: Vec<(u32, u32, u32, u8)> = Vec::new(); // (pc, enc, stall, mode)
+
+        for _ in 0..(30_000_000u64 * 3) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !dark_blue_found {
+                dark_blue_found = true;
+            }
+
+            if dark_blue_found && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let mode = (gba.cpsr & 0x1F) as u8;
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                if !in_irq && mode == 0x12 {
+                    in_irq = true;
+                    irq_count += 1;
+                    trace.clear();
+                }
+
+                if in_irq {
+                    if irq_count == 2 {
+                        // Trace the 2nd IRQ (first real Timer1 IRQ)
+                        let enc = if is_thumb { gba.mem_read16(pc) as u32 } else { gba.mem_read32(pc) };
+                        gba.tick_one_cycle();
+                        trace.push((pc, enc, gba.stall_cycles, mode));
+                        while gba.cpu_cycles_remaining > 0 { gba.tick_one_cycle(); }
+                        continue;
+                    }
+
+                    // Check if back in loop
+                    let cur_is_thumb = (gba.cpsr & 0x20) != 0;
+                    let cur_pc = gba.regs[15].wrapping_sub(if cur_is_thumb { 4 } else { 8 });
+                    if cur_is_thumb && (cur_pc >= 0x08016FD0 && cur_pc <= 0x08017010) {
+                        in_irq = false;
+                        if irq_count == 2 {
+                            let total: u32 = trace.iter().map(|(_, _, c, _)| c).sum();
+                            println!("Full ISR trace ({} insns, {} cycles):", trace.len(), total);
+                            println!("{:8} {:8} {:3} M", "PC", "ENC", "CYC");
+                            for (tpc, enc, cyc, m) in &trace {
+                                println!("  {:08X} {:08X} {:3} {:02X}", tpc, enc, cyc, m);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
     fn test_meteorain_isr_location() {
         // Find the game's ISR pointer at 0x03007FFC and trace one IRQ
         let mut gba = make_gba("/task/dev-roms/meteorain.gba");
