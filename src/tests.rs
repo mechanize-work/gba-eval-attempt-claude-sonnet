@@ -197,6 +197,30 @@ mod tests {
     }
 
     #[test]
+    fn test_waitcnt_trace() {
+        for (name, rom) in [
+            ("anguna", "/task/dev-roms/anguna.gba"),
+            ("meteorain", "/task/dev-roms/meteorain.gba"),
+            ("trogdor", "/task/dev-roms/trogdor.gba"),
+            ("xniq", "/task/dev-roms/xniq.gba"),
+        ] {
+            let mut gba = make_gba(rom);
+            print!("{}: WAITCNT=0x{:04X}", name, gba.waitcnt);
+            let mut last_wc = gba.waitcnt;
+            for cycle in 0..(280896u32 * 5) {
+                let old = gba.waitcnt;
+                gba.tick_one_cycle();
+                if gba.waitcnt != old {
+                    let frame = cycle / 280896;
+                    print!(", [f{frame} c{cycle}] 0x{:04X}->0x{:04X}", old, gba.waitcnt);
+                    last_wc = gba.waitcnt;
+                }
+            }
+            println!(" (final: 0x{:04X})", last_wc);
+        }
+    }
+
+    #[test]
     fn test_meteorain_dispcnt() {
         let mut gba = make_gba("/task/dev-roms/meteorain.gba");
         let mut last_dispcnt = gba.dispcnt;

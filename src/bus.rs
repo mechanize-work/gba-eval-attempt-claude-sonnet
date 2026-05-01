@@ -35,21 +35,23 @@ impl Gba {
     // Sequential (S) access cycles
     pub(crate) fn mem_cycles_s(&self, addr: u32, width: u8) -> u32 {
         let wc = self.waitcnt;
+        let prefetch = (wc >> 14) & 1 != 0;
         match addr >> 24 {
             0x00 => 1,
             0x02 => if width == 4 { 6 } else { 3 },
             0x03 | 0x04 | 0x07 => 1,
             0x05 | 0x06 => if width == 4 { 2 } else { 1 },
             0x08 | 0x09 => {
-                let s = 1 + [2u32, 1][((wc >> 4) & 1) as usize];
+                // Prefetch buffer reduces S-cycle to 1 cycle per halfword (16-bit)
+                let s = if prefetch { 1 } else { 1 + [2u32, 1][((wc >> 4) & 1) as usize] };
                 if width == 4 { s + s } else { s }
             }
             0x0A | 0x0B => {
-                let s = 1 + [4u32, 1][((wc >> 7) & 1) as usize];
+                let s = if prefetch { 1 } else { 1 + [4u32, 1][((wc >> 7) & 1) as usize] };
                 if width == 4 { s + s } else { s }
             }
             0x0C | 0x0D => {
-                let s = 1 + [8u32, 1][((wc >> 10) & 1) as usize];
+                let s = if prefetch { 1 } else { 1 + [8u32, 1][((wc >> 10) & 1) as usize] };
                 if width == 4 { s + s } else { s }
             }
             0x0E | 0x0F => {

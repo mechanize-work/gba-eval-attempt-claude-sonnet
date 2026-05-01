@@ -398,7 +398,8 @@ impl Gba {
         self.ie = 0; self.if_ = 0; self.ime = 0;
         self.keyinput = 0x03FF;
         self.keycnt = 0;
-        self.waitcnt = 0; self.postflg = 0; self.haltcnt = 0;
+        // Real GBA BIOS sets WAITCNT=0x4317 (WS0=3,1; WS1=8,1; WS2=8,1; prefetch on; sram=8)
+        self.waitcnt = 0x4317; self.postflg = 0; self.haltcnt = 0;
         self.cycles = 0; self.frame_cycles = 0;
         self.dma_pending = 0;
         self.branch_taken = false;
@@ -520,16 +521,16 @@ impl Gba {
         // Timer update
         self.tick_timers(1);
 
+        // Run DMA if pending (DMA takes bus priority over CPU)
+        if self.dma_pending != 0 {
+            self.run_pending_dma();
+        }
+
         // If CPU is stalled for memory wait states, just advance hardware
         if self.cpu_cycles_remaining > 0 {
             self.cpu_cycles_remaining -= 1;
             self.cycles += 1;
             return;
-        }
-
-        // Run DMA if pending (DMA runs at "start" of cycle before CPU)
-        if self.dma_pending != 0 {
-            self.run_pending_dma();
         }
 
         // Check interrupts and run CPU
