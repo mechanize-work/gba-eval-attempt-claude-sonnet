@@ -3956,33 +3956,24 @@ mod tests {
         // Trace when DISPCNT bit 7 (forced blank) changes during frame 12.
         // Oracle clears it at scanline 15, we clear at scanline 9. Find why.
         let mut gba = make_gba("/task/dev-roms/meteorain.gba");
-        let mut last_dispcnt: u16 = 0xFFFF;
-        let mut frame_count = 0u32;
+        // DISPCNT is at ioregs[0..2] (offset 0x000)
+        let mut last_fb = (gba.dispcnt >> 7) & 1;
+        let mut vblank_count = 0u32;
         let mut last_scanline = 0u32;
-        let frame12_start_cycle = 197120u64 + 12 * 280896;  // VBlank 12 + VBlank offset
 
-        for _ in 0..5_000_000_000u64 {
-            // Count frames
+        while gba.cycles < 4_500_000 {
             if gba.scanline == 160 && last_scanline == 159 {
-                frame_count += 1;
+                vblank_count += 1;
             }
             last_scanline = gba.scanline;
 
-            let dispcnt = (gba.io_read16(0) as u16) | 0;
-            if dispcnt != last_dispcnt {
-                let scanline = gba.scanline;
-                let cyc = gba.cycles;
+            let fb = (gba.dispcnt >> 7) & 1;
+            if fb != last_fb {
                 let is_thumb = (gba.cpsr & 0x20) != 0;
                 let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
-                // Focus on forced blank bit change (bit 7)
-                let was_fb = (last_dispcnt >> 7) & 1;
-                let now_fb = (dispcnt >> 7) & 1;
-                if was_fb != now_fb {
-                    println!("DISPCNT ForcedBlank {}->{}: cycle={} frame={} scanline={} PC={:08X}",
-                        was_fb, now_fb, cyc, frame_count, scanline, pc);
-                }
-                last_dispcnt = dispcnt;
-                if frame_count > 14 { break; }
+                println!("ForcedBlank {}->{}: cycle={} vblank={} scanline={} PC={:08X}",
+                    last_fb, fb, gba.cycles, vblank_count, gba.scanline, pc);
+                last_fb = fb;
             }
 
             gba.tick_one_cycle();
