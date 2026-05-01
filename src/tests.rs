@@ -1807,6 +1807,59 @@ mod tests {
     }
 
     #[test]
+    fn test_meteorain_loop_disasm() {
+        // Read and print ROM bytes at loop addresses for manual disassembly
+        let gba = make_gba("/task/dev-roms/meteorain.gba");
+        // Loop is in Thumb mode; print 16-bit halfwords at key addresses
+        let addrs = [
+            0x08016FD2u32, 0x08016FD4, 0x08016FD6, 0x08016FD8, 0x08016FDA,
+            0x08016FDC, 0x08016FDE, 0x08016FE0, 0x08016FE2, 0x08016FE4,
+            0x08016FE6, 0x08016FE8, 0x08016FEA,
+            0x08017002, 0x08017004,
+            0x08018E10, 0x08018E12, 0x08018E14, 0x08018E16,
+        ];
+        println!("ROM loop instruction bytes:");
+        for &addr in &addrs {
+            let offset = (addr - 0x08000000) as usize;
+            let hw = (gba.rom[offset] as u16) | ((gba.rom[offset + 1] as u16) << 8);
+            println!("  {:08X}: {:04X}  (decode: {})", addr, hw, decode_thumb(hw));
+        }
+    }
+
+    fn decode_thumb(hw: u16) -> String {
+        // Minimal Thumb disassembler for key instruction types
+        let bits15_11 = hw >> 11;
+        let bits15_10 = hw >> 10;
+        let bits15_13 = hw >> 13;
+        if bits15_11 == 0b11110 { return format!("BL/BLX hi (upper half)"); }
+        if bits15_11 == 0b11111 { return format!("BL lo (lower half, branch)"); }
+        if bits15_11 == 0b11110 { return format!("BL lo (ARM)"); }
+        if bits15_10 == 0b010000 { return format!("ALU ops"); }
+        if hw >> 12 == 0b1011 {
+            let op = (hw >> 9) & 3;
+            let rlist = hw & 0xFF;
+            let r = (hw >> 8) & 1;
+            if op == 2 { return format!("PUSH rlist={:02X} R={}", rlist, r); }
+            if op == 3 { return format!("POP rlist={:02X} R={}", rlist, r); }
+        }
+        if bits15_11 == 0b01111 { return format!("LDR Rd,[PC,#{}] (PC-relative load from ROM)", (hw & 0xFF) << 2); }
+        if bits15_11 == 0b01101 { return format!("LDR Rd,[Rn,#imm]"); }
+        if bits15_11 == 0b11001 { return format!("LDR Rd,[PC,#{}] word", (hw & 0xFF) << 2); }  // same as 01111
+        let fmt = match bits15_13 {
+            0b000 => "shift/add/sub",
+            0b001 => "mov/cmp/add/sub imm",
+            0b010 => "ALU/data",
+            0b011 => "load/store",
+            0b100 => "load/store/branch",
+            0b101 => "load/store/branch",
+            0b110 => "cond branch/swi",
+            0b111 => "unconditional branch",
+            _ => "?",
+        };
+        format!("bits15-13={:03b} fmt={}", bits15_13, fmt)
+    }
+
+    #[test]
     fn test_meteorain_loop_insn_cycles() {
         // Trace per-instruction cycle costs in the ROM search loop at 0x08016FA6
         // to understand the 25% gap between our timing and oracle's
@@ -1830,24 +1883,26 @@ mod tests {
             gba.tick_one_cycle();
         }
 
-        // Trace one full iteration: record (pc, stall_cycles) for each instruction
-        let mut trace: Vec<(u32, u32)> = Vec::new();
+        // Trace 100 iterations: record (pc, stall_cycles) for all instructions
+        let mut pc_cycles: std::collections::HashMap<u32, (u64, u64)> = std::collections::HashMap::new();
         let iter_start_cycle = gba.cycles;
-        let mut iteration_done = false;
+        let mut iter_count = 0u32;
+        let mut total_insns = 0u64;
 
-        for _ in 0..10_000 {
+        for _ in 0..500_000 {
             if gba.cpu_cycles_remaining == 0 && !gba.halted {
                 let is_thumb = (gba.cpsr & 0x20) != 0;
                 if is_thumb {
                     let pc = gba.regs[15].wrapping_sub(4);
                     gba.tick_one_cycle();
-                    // stall_cycles now has the cost of that instruction
-                    let sc = gba.stall_cycles;
-                    trace.push((pc, sc));
-                    // Check if we've returned to loop top (one iteration done)
-                    if pc == 0x08016FD2 && trace.len() > 1 {
-                        iteration_done = true;
-                        break;
+                    let sc = gba.stall_cycles as u64;
+                    let e = pc_cycles.entry(pc).or_insert((0, 0));
+                    e.0 += 1;
+                    e.1 += sc;
+                    total_insns += 1;
+                    if pc == 0x08016FD2 {
+                        iter_count += 1;
+                        if iter_count >= 100 { break; }
                     }
                     continue;
                 }
@@ -1855,25 +1910,21 @@ mod tests {
             gba.tick_one_cycle();
         }
 
-        let iter_cycles = gba.cycles as i64 - iter_start_cycle as i64;
-        println!("Loop iteration trace ({} instructions, {} cycles):", trace.len(), iter_cycles);
-
-        // Aggregate by PC to see total cycles at each address
-        let mut pc_cycles: std::collections::HashMap<u32, (u32, u32)> = std::collections::HashMap::new();
-        for &(pc, sc) in &trace {
-            let e = pc_cycles.entry(pc).or_insert((0, 0));
-            e.0 += 1;  // count
-            e.1 += sc; // total stall cycles
-        }
+        let total_cycles = gba.cycles as i64 - iter_start_cycle as i64;
+        println!("100 iterations: {} total cycles, {:.1} avg cycles/iter, {} insns total",
+            total_cycles, total_cycles as f64 / iter_count as f64, total_insns);
 
         // Print in PC order
         let mut sorted: Vec<_> = pc_cycles.into_iter().collect();
         sorted.sort_by_key(|e| e.0);
+        println!("Per-PC breakdown (total over 100 iterations):");
+        let mut grand_total_cycles = 0u64;
         for (pc, (count, cycles)) in &sorted {
-            println!("  PC={:08X}: {} insns, {} cycles ({:.1} avg)",
+            println!("  PC={:08X}: {} executions, {} total cycles ({:.2} avg)",
                 pc, count, cycles, *cycles as f64 / *count as f64);
+            grand_total_cycles += cycles;
         }
-
-        println!("Iteration done: {}", iteration_done);
+        println!("Grand total from PC breakdown: {} cycles ({:.1} avg/iter)",
+            grand_total_cycles, grand_total_cycles as f64 / iter_count as f64);
     }
 }
