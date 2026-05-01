@@ -155,12 +155,10 @@ impl Gba {
     #[inline]
     fn set_reg(&mut self, n: u32, val: u32) {
         if n == 15 {
-            // Branch: set PC with pipeline
-            if (self.cpsr & CPSR_T) != 0 {
-                self.regs[15] = (val & !1).wrapping_add(4);
-            } else {
-                self.regs[15] = (val & !3).wrapping_add(8);
-            }
+            // Writing to PC: flush pipeline and branch
+            // In ARM mode: PC set to val (word-aligned) + 8 for pipeline
+            // But for data processing results, we just branch to val
+            self.regs[15] = (val & !3).wrapping_add(8);
         } else {
             self.regs[n as usize] = val;
         }
@@ -684,26 +682,30 @@ impl Gba {
 
     // ===== Software Interrupt =====
     fn arm_swi(&mut self, _instr: u32) {
-        // Save return address and CPSR
-        self.bank_svc[1] = self.regs[15].wrapping_sub(4);  // LR_svc = next instr
+        // LR_svc = address of instruction after SWI = A+4
+        // At this point regs[15] = A+12 (after arm_step advance)
+        // So A+4 = regs[15] - 8
+        self.bank_svc[1] = self.regs[15].wrapping_sub(8);
         self.spsr_svc = self.cpsr;
-        // Switch to SVC mode
-        self.switch_mode(MODE_SVC);
-        self.cpsr &= !CPSR_T;
-        self.cpsr |= CPSR_I;  // Disable IRQ
-        // Jump to SWI vector
-        self.regs[15] = 0x08;  // SWI vector
-        // Pipeline effect
-        self.regs[15] = self.regs[15].wrapping_add(8);
+        let old_mode = self.cpsr & 0x1F;
+        self.save_banked(old_mode);
+        self.cpsr = (self.cpsr & !0x3F) | MODE_SVC | CPSR_I;
+        self.regs[13] = self.bank_svc[0];
+        self.regs[14] = self.bank_svc[1];
+        // Jump to SWI vector (0x08) with pipeline offset
+        self.regs[15] = 0x08u32.wrapping_add(8);
     }
 
     fn arm_undefined(&mut self, _instr: u32) {
-        self.bank_und[1] = self.regs[15].wrapping_sub(4);
+        // LR_und = address of undefined instruction + 4
+        self.bank_und[1] = self.regs[15].wrapping_sub(8).wrapping_add(4);
         self.spsr_und = self.cpsr;
-        self.switch_mode(MODE_UND);
-        self.cpsr &= !CPSR_T;
-        self.cpsr |= CPSR_I;
-        self.regs[15] = 0x04 + 8;
+        let old_mode = self.cpsr & 0x1F;
+        self.save_banked(old_mode);
+        self.cpsr = (self.cpsr & !0x3F) | MODE_UND | CPSR_I;
+        self.regs[13] = self.bank_und[0];
+        self.regs[14] = self.bank_und[1];
+        self.regs[15] = 0x04u32.wrapping_add(8);
     }
 
     // ===== PSR Transfer =====
@@ -873,70 +875,21 @@ impl Gba {
     // ===== IRQ handling =====
     pub(crate) fn cpu_do_irq(&mut self) {
         if (self.cpsr & CPSR_I) != 0 { return; }
-        // Save return address (current PC - 4... actually for ARM:)
-        // IRQ return address: LR_irq = instruction after the one that was interrupted + 4
-        // Since we're at the "next instruction" which is regs[15] - 4 (after arm_step advance),
-        // the interrupt return address is regs[15] - 4 + 4 = regs[15]...
-        // Wait: for ARM mode, IRQ return: LR = PC - 4 (where PC = instruction + 8 at time of IRQ)
-        // So LR = regs[15] - 4 + 4... Actually standard ARM IRQ return:
-        // SUBS PC, LR, #4 (which means execution continues from the interrupted instruction)
-        // So LR = PC (the +8 ahead value) - 4 = current executing instruction + 4...
-        // Simpler: LR_irq = regs[15] - 4 (since regs[15] is already the next instruction + 4 after step)
-        // Hmm. Let me just use the standard: LR_irq = PC of next instruction after interrupt
 
-        let pc = self.regs[15];  // This is instruction_addr + 8 + 4 (after advance)
-        // For IRQ: LR_irq = address of instruction that would have executed + 4
-        // = (pc - 4) is address of next instruction that was about to execute
-        // IRQ standard: LR = PC - 4 (so SUBS PC, LR, #4 returns to interrupted instruction)
-        // = (pc - 4) - 4 = pc - 8? No...
-
-        // OK standard definition: when IRQ is taken:
-        // In ARM mode: LR_irq = address of next instruction to execute (the one that was interrupted)
-        // Return is: SUBS PC, LR_irq, #4 to re-execute the instruction
-        // But actually GBA games use: SUBS PC, LR, #4
-        // So LR_irq should be = address_of_instruction_that_would_execute + 4
-
-        // Let me use: LR_irq = PC (i.e., regs[15] - 4)
-        // When interrupt happens, CPU was about to execute instruction at regs[15] - 8 (after arm_step advance)
-        // Wait, after arm_step: regs[15] = old_pc + 4 (where old_pc was instruction + 8)
-        // So current instruction was at: regs[15] - 4 - 8 = regs[15] - 12
-
-        // For GBA IRQ handling (from GBATEK):
-        // LR = PC (pointing 2 instructions ahead in ARM mode = current + 8)
-        // Well actually: The ARM spec says for IRQ:
-        // LR_irq = address of next instruction + 4
-        // = (instruction_being_executed) + 4 + 4 = instruction + 8
-        // But we want return to be MOVS PC, LR (or SUBS PC, LR, #4)
-        // GBA BIOS uses: STMFD SP!, {R0-R3, R12, LR}; LDR R0, =IE_addr; ... SUBS PC, LR, #4
-
-        // Let's use: LR_irq = regs[15] - 4 (which at this point = instruction + 8)
-        // This is wrong but let me check: after arm_step ran, regs[15] was incremented by 4
-        // So regs[15] = instruction_addr + 8 + 4 = instruction_addr + 12
-        // LR = regs[15] - 4 = instruction_addr + 8... hmm
-
-        // For Thumb mode: LR_irq = PC (2 instructions ahead) = current_thumb_instr + 4
-        // After thumb_step: regs[15] = thumb_instr + 4 + 2 = thumb_instr + 6
-        // LR = regs[15] - 2 = thumb_instr + 4
-
-        // The standard GBA approach:
-        // For ARM: LR_irq = PC + 4 (where PC = instruction + 8) = instruction + 12
-        // ... No, for ARM: interrupted instruction is at addr A. Next to execute is A+4.
-        // LR_irq = A + 4 + 4 = A + 8. Return: SUBS PC, LR, #4 → executes from A+4. OK.
-        // But: regs[15] after arm_step = A + 8 + 4 = A + 12
-        // So LR_irq = regs[15] - 4 = A + 8. This seems right!
-
+        // ARM: interrupted at A, next=A+4, LR=A+8. regs[15]=A+12. LR=regs[15]-4.
+        // Thumb: interrupted at B, next=B+2, LR=B+6. regs[15]=B+6. LR=regs[15].
         self.bank_irq[1] = if (self.cpsr & CPSR_T) != 0 {
-            self.regs[15] - 2 + 4  // Thumb: LR = next_thumb_instr + 4
+            self.regs[15]        // Thumb: LR = B+6
         } else {
-            self.regs[15] - 4  // ARM: LR = A + 8
+            self.regs[15] - 4    // ARM: LR = A+8
         };
         self.spsr_irq = self.cpsr;
         self.save_banked(self.cpsr & 0x1F);
         self.cpsr = (self.cpsr & !0x3F) | MODE_IRQ | CPSR_I;
+        self.cpsr &= !CPSR_T;   // IRQ always in ARM mode
         self.regs[13] = self.bank_irq[0];
         self.regs[14] = self.bank_irq[1];
-        // Jump to IRQ vector
-        self.regs[15] = 0x18 + 8;  // IRQ vector + pipeline
+        self.regs[15] = 0x18u32.wrapping_add(8);
         self.halted = false;
     }
 
@@ -1035,16 +988,19 @@ impl Gba {
                 match op11 {
                     0b00 => self.thumb_branch(instr),  // Format 18: Unconditional branch
                     0b10 => {
-                        // Format 19 part 1: BL/BLX prefix (set LR)
-                        let offset = (instr & 0x7FF) as i32;
-                        let offset = (offset << 21) >> 21;  // sign extend 11 bits
-                        self.regs[14] = self.regs[15].wrapping_add((offset << 12) as u32);
+                        // Format 19 part 1: BL prefix (set LR)
+                        // LR = (instr_addr + 4) + SignExt(offset_hi) << 12
+                        // = (regs[15] - 2) + SignExt(offset_hi) << 12
+                        let offset = ((instr & 0x7FF) as i32) << 21 >> 21;
+                        self.regs[14] = self.regs[15].wrapping_sub(2).wrapping_add((offset << 12) as u32);
                     }
                     0b11 => {
                         // Format 19 part 2: BL suffix
+                        // target = LR + offset_lo << 1
+                        // return addr = instr_addr + 2 = regs[15] - 4, set LR = (return_addr) | 1
                         let offset = (instr & 0x7FF) << 1;
                         let target = self.regs[14].wrapping_add(offset);
-                        self.regs[14] = (self.regs[15].wrapping_sub(2)) | 1;  // LR = return addr | 1
+                        self.regs[14] = self.regs[15].wrapping_sub(4) | 1;
                         self.regs[15] = (target & !1).wrapping_add(4);
                     }
                     0b01 => {
@@ -1257,12 +1213,13 @@ impl Gba {
     }
 
     fn thumb_pc_rel_load(&mut self, instr: u32) {
+        // Format 6: PC-relative load
+        // PC = (instr_addr + 4) & !2 = word-aligned
+        // = (regs[15] - 2) & !3
         let rd = (instr >> 8) & 0x7;
         let offset = (instr & 0xFF) << 2;
-        // PC is word-aligned, + 4 (thumb pipeline)
-        let pc = self.regs[15] & !2;  // word aligned
-        let addr = pc.wrapping_add(offset);
-        self.regs[rd as usize] = self.mem_read32(addr & !3);
+        let pc = self.regs[15].wrapping_sub(2) & !3;
+        self.regs[rd as usize] = self.mem_read32(pc.wrapping_add(offset));
     }
 
     fn thumb_load_store(&mut self, instr: u32) {
@@ -1364,11 +1321,12 @@ impl Gba {
     }
 
     fn thumb_load_address(&mut self, instr: u32) {
-        // Format 12
+        // Format 12: load address (from PC or SP)
         let sp = (instr >> 11) & 1 != 0;
         let rd = (instr >> 8) & 0x7;
         let offset = (instr & 0xFF) << 2;
-        let base = if sp { self.regs[13] } else { self.regs[15] & !2 };
+        // PC for this is (instr_addr+4) word-aligned = (regs[15]-2) & !3
+        let base = if sp { self.regs[13] } else { (self.regs[15].wrapping_sub(2)) & !3 };
         self.regs[rd as usize] = base.wrapping_add(offset);
     }
 
@@ -1454,30 +1412,30 @@ impl Gba {
         let cond = ((instr >> 8) & 0xF) as u8;
         if !self.check_cond(cond) { return; }
         let offset = ((instr & 0xFF) as i8 as i32) * 2;
-        // regs[15] after thumb_step = thumb_instr + 6
-        // target = thumb_instr + 4 + offset
-        // = (regs[15] - 2) + offset
-        let target = self.regs[15].wrapping_add(offset as u32);
+        // regs[15] after thumb_step = instr_addr + 6
+        // target = (instr_addr + 4) + offset = (regs[15] - 2) + offset
+        let target = self.regs[15].wrapping_sub(2).wrapping_add(offset as u32);
         self.regs[15] = (target & !1).wrapping_add(4);
     }
 
     fn thumb_swi(&mut self, _instr: u32) {
-        self.bank_svc[1] = self.regs[15].wrapping_sub(2);  // LR_svc = next thumb instr
+        // LR_svc = address of instruction after SWI = B+2
+        // After thumb_step: regs[15] = B+6. B+2 = regs[15]-4.
+        self.bank_svc[1] = self.regs[15].wrapping_sub(4);
         self.spsr_svc = self.cpsr;
         self.save_banked(self.cpsr & 0x1F);
         self.cpsr = (self.cpsr & !0x3F) | MODE_SVC | CPSR_I;
         self.cpsr &= !CPSR_T;  // Switch to ARM
         self.regs[13] = self.bank_svc[0];
         self.regs[14] = self.bank_svc[1];
-        self.regs[15] = 0x08 + 8;
+        self.regs[15] = 0x08u32.wrapping_add(8);
     }
 
     fn thumb_branch(&mut self, instr: u32) {
-        // Unconditional branch, 11-bit offset
-        let offset = (instr & 0x7FF) as i32;
-        let offset = (offset << 21) >> 21;  // sign extend
-        let offset = offset * 2;
-        let target = self.regs[15].wrapping_add(offset as u32);
+        // Unconditional branch, 11-bit signed offset
+        // target = (instr_addr + 4) + offset*2 = (regs[15]-2) + offset*2
+        let offset = ((instr & 0x7FF) as i32) << 21 >> 20;  // sign extend and *2
+        let target = self.regs[15].wrapping_sub(2).wrapping_add(offset as u32);
         self.regs[15] = (target & !1).wrapping_add(4);
     }
 }

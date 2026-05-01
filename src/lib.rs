@@ -5,13 +5,6 @@ mod apu;
 mod dma;
 mod timer;
 
-use core::panic::PanicInfo;
-
-#[panic_handler]
-fn panic(_: &PanicInfo) -> ! {
-    loop {}
-}
-
 // ============================================================
 // Main GBA state struct
 // ============================================================
@@ -125,6 +118,7 @@ pub(crate) struct Gba {
 
     // === INPUT ===
     pub keyinput: u16,  // active-low (KEYINPUT register)
+    pub keycnt:   u16,  // Key interrupt control
 
     // === MISC ===
     pub waitcnt:  u16,
@@ -309,6 +303,7 @@ impl Gba {
 
             ie: 0, if_: 0, ime: 0,
             keyinput: 0x03FF,  // all buttons released (active-low)
+            keycnt: 0,
 
             waitcnt: 0, postflg: 0, haltcnt: 0,
             cycles: 0, frame_cycles: 0,
@@ -387,6 +382,7 @@ impl Gba {
         // Reset interrupts
         self.ie = 0; self.if_ = 0; self.ime = 0;
         self.keyinput = 0x03FF;
+        self.keycnt = 0;
         self.waitcnt = 0; self.postflg = 0; self.haltcnt = 0;
         self.cycles = 0; self.frame_cycles = 0;
         self.dma_pending = 0;
