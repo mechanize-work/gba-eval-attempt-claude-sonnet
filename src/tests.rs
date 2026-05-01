@@ -2235,36 +2235,118 @@ mod tests {
                     trace.clear();
                 }
 
-                if in_irq {
-                    if irq_count == 2 {
-                        // Trace the 2nd IRQ (first real Timer1 IRQ)
-                        let enc = if is_thumb { gba.mem_read16(pc) as u32 } else { gba.mem_read32(pc) };
-                        gba.tick_one_cycle();
-                        trace.push((pc, enc, gba.stall_cycles, mode));
-                        while gba.cpu_cycles_remaining > 0 { gba.tick_one_cycle(); }
-                        continue;
-                    }
+                if in_irq && irq_count == 2 {
+                    // Trace the 2nd IRQ instruction by instruction
+                    let enc = if is_thumb { gba.mem_read16(pc) as u32 } else { gba.mem_read32(pc) };
+                    gba.tick_one_cycle();
+                    trace.push((pc, enc, gba.stall_cycles, mode));
+                    while gba.cpu_cycles_remaining > 0 { gba.tick_one_cycle(); }
 
-                    // Check if back in loop
-                    let cur_is_thumb = (gba.cpsr & 0x20) != 0;
-                    let cur_pc = gba.regs[15].wrapping_sub(if cur_is_thumb { 4 } else { 8 });
-                    if cur_is_thumb && (cur_pc >= 0x08016FD0 && cur_pc <= 0x08017010) {
+                    // Check if we just returned to the search loop
+                    let now_thumb = (gba.cpsr & 0x20) != 0;
+                    let now_pc = gba.regs[15].wrapping_sub(if now_thumb { 4 } else { 8 });
+                    if now_thumb && (now_pc >= 0x08016FD0 && now_pc <= 0x08017010) {
                         in_irq = false;
-                        if irq_count == 2 {
-                            let total: u32 = trace.iter().map(|(_, _, c, _)| c).sum();
-                            println!("Full ISR trace ({} insns, {} cycles):", trace.len(), total);
-                            println!("{:8} {:8} {:3} M", "PC", "ENC", "CYC");
-                            for (tpc, enc, cyc, m) in &trace {
-                                println!("  {:08X} {:08X} {:3} {:02X}", tpc, enc, cyc, m);
-                            }
-                            break;
+                        let total: u32 = trace.iter().map(|(_, _, c, _)| c).sum();
+                        println!("Full ISR trace ({} insns, {} cycles):", trace.len(), total);
+                        println!("{:8} {:8} {:3} M", "PC", "ENC", "CYC");
+                        for (tpc, enc, cyc, m) in &trace {
+                            println!("  {:08X} {:08X} {:3} {:02X}", tpc, enc, cyc, m);
                         }
+                        break;
+                    }
+                    continue;
+                }
+
+                if in_irq && irq_count != 2 {
+                    // For other IRQs, just check if back in loop
+                    if is_thumb && (pc >= 0x08016FD0 && pc <= 0x08017010) {
+                        in_irq = false;
                     }
                 }
             }
 
             gba.tick_one_cycle();
         }
+    }
+
+    #[test]
+    fn test_meteorain_iram_monitor() {
+        // Monitor writes to IRAM[0x030012CC] and [0x030012D0] (offsets 76 and 80 from R4=0x03001280)
+        // These two values determine whether the ISR ROM function takes the fast or slow path
+        // Fast path (our emulator): R1 == R3 (both IRAM addresses equal) → BEQ taken → ~300 cycles
+        // Slow path (oracle presumably): R1 != R3 → longer loop → more ISR cycles
+        //
+        // The fix needs to ensure these values are set correctly during game initialization
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut dark_blue_found = false;
+        let mut last_v_cc: u32 = 0xDEAD;
+        let mut last_v_d0: u32 = 0xDEAD;
+
+        for _ in 0..(30_000_000u64 * 3) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !dark_blue_found {
+                dark_blue_found = true;
+                println!("Dark blue start at cycle {}:", gba.cycles);
+                // Print current values
+                let iram_cc = read_iram_word(&gba, 0x030012CC);
+                let iram_d0 = read_iram_word(&gba, 0x030012D0);
+                println!("  IRAM[0x030012CC] = 0x{:08X}", iram_cc);
+                println!("  IRAM[0x030012D0] = 0x{:08X}", iram_d0);
+
+                // Dump context around these addresses
+                for off in 0u32..20 {
+                    let addr = 0x03001280 + off * 4;
+                    let val = read_iram_word(&gba, addr);
+                    if val != 0 {
+                        println!("  IRAM[{:08X}] = 0x{:08X} (struct+{})", addr, val, off*4);
+                    }
+                }
+            }
+
+            // Monitor changes
+            if dark_blue_found && gba.cpu_cycles_remaining == 0 {
+                let v_cc = read_iram_word(&gba, 0x030012CC);
+                let v_d0 = read_iram_word(&gba, 0x030012D0);
+                if v_cc != last_v_cc || v_d0 != last_v_d0 {
+                    let is_thumb = (gba.cpsr & 0x20) != 0;
+                    let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                    println!("Change at cycle={} PC={:08X}: [CC]={:08X} [D0]={:08X}",
+                        gba.cycles, pc, v_cc, v_d0);
+                    last_v_cc = v_cc;
+                    last_v_d0 = v_d0;
+                }
+            }
+
+            // Also check before dark blue starts (initialization)
+            if !dark_blue_found {
+                let v_cc = read_iram_word(&gba, 0x030012CC);
+                let v_d0 = read_iram_word(&gba, 0x030012D0);
+                if v_cc != last_v_cc || v_d0 != last_v_d0 {
+                    let is_thumb = (gba.cpsr & 0x20) != 0;
+                    let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                    if last_v_cc == 0xDEAD && last_v_d0 == 0xDEAD {
+                        last_v_cc = v_cc;
+                        last_v_d0 = v_d0;
+                    } else {
+                        println!("Init change at cycle={} PC={:08X}: [CC]={:08X} [D0]={:08X}",
+                            gba.cycles, pc, v_cc, v_d0);
+                        last_v_cc = v_cc;
+                        last_v_d0 = v_d0;
+                    }
+                }
+            }
+
+            // Stop after 50 changes or 5 seconds
+            gba.tick_one_cycle();
+        }
+    }
+
+    fn read_iram_word(gba: &Gba, addr: u32) -> u32 {
+        let off = (addr & 0x7FFC) as usize;
+        (gba.iram[off] as u32) | ((gba.iram[off+1] as u32) << 8)
+            | ((gba.iram[off+2] as u32) << 16) | ((gba.iram[off+3] as u32) << 24)
     }
 
     #[test]
