@@ -758,9 +758,16 @@ impl Gba {
     }
 
     fn save_banked(&mut self, mode: u32) {
+        // R8-R12 are unbanked in all non-FIQ modes (same physical registers).
+        // Only R13/R14 are per-mode banked. FIQ has its own R8-R14.
+        // bank_user[0..4] = user R8-R12 saved when entering FIQ
+        // bank_user[5..6] = user/system R13, R14
         match mode {
             MODE_FIQ => {
+                // Save FIQ R8-R14 to bank_fiq
                 for i in 0..7 { self.bank_fiq[i] = self.regs[8 + i]; }
+                // Restore user R8-R12 (leaving FIQ, physical regs go back to user values)
+                for i in 0..5 { self.regs[8 + i] = self.bank_user[i]; }
             }
             MODE_IRQ => {
                 self.bank_irq[0] = self.regs[13];
@@ -779,7 +786,9 @@ impl Gba {
                 self.bank_und[1] = self.regs[14];
             }
             MODE_USR | MODE_SYS => {
-                for i in 0..7 { self.bank_user[i] = self.regs[8 + i]; }
+                // Only save R13, R14 — R8-R12 are shared with all non-FIQ modes
+                self.bank_user[5] = self.regs[13];
+                self.bank_user[6] = self.regs[14];
             }
             _ => {}
         }
@@ -788,48 +797,34 @@ impl Gba {
     fn restore_banked(&mut self, mode: u32) {
         match mode {
             MODE_FIQ => {
-                // Save user R8-R14 and load FIQ R8-R14
-                for i in 0..7 { self.bank_user[i] = self.regs[8 + i]; }
+                // Save current (user) R8-R12 before entering FIQ
+                for i in 0..5 { self.bank_user[i] = self.regs[8 + i]; }
+                // Load FIQ R8-R14
                 for i in 0..7 { self.regs[8 + i] = self.bank_fiq[i]; }
             }
             MODE_IRQ => {
-                // Restore user R8-R12 if coming from FIQ
-                self.ensure_user_r8_r12();
                 self.regs[13] = self.bank_irq[0];
                 self.regs[14] = self.bank_irq[1];
             }
             MODE_SVC => {
-                self.ensure_user_r8_r12();
                 self.regs[13] = self.bank_svc[0];
                 self.regs[14] = self.bank_svc[1];
             }
             MODE_ABT => {
-                self.ensure_user_r8_r12();
                 self.regs[13] = self.bank_abt[0];
                 self.regs[14] = self.bank_abt[1];
             }
             MODE_UND => {
-                self.ensure_user_r8_r12();
                 self.regs[13] = self.bank_und[0];
                 self.regs[14] = self.bank_und[1];
             }
             MODE_USR | MODE_SYS => {
-                // Restore user banks
-                for i in 0..7 { self.regs[8 + i] = self.bank_user[i]; }
+                // Only restore R13, R14 — R8-R12 remain as shared physical registers
+                self.regs[13] = self.bank_user[5];
+                self.regs[14] = self.bank_user[6];
             }
             _ => {}
         }
-    }
-
-    fn ensure_user_r8_r12(&mut self) {
-        // If coming from FIQ mode, restore user R8-R12
-        // This is already handled by save_banked for FIQ
-        // For non-FIQ modes, bank_user[0..5] already has R8-R12
-        // We just need to make sure regs[8..13] has user values
-        // Actually save_banked for non-FIQ modes saves R8-R14 to bank_user,
-        // but for non-FIQ modes R8-R12 are shared with user mode.
-        // Let me just restore from bank_user for R8-R12
-        for i in 0..5 { self.regs[8 + i] = self.bank_user[i]; }
     }
 
     pub(crate) fn get_spsr(&self) -> u32 {

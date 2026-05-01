@@ -160,6 +160,52 @@ mod tests {
     }
 
     #[test]
+    fn test_bios_exec() {
+        // Trace what happens in the BIOS after the first SWI 5 call
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let mut in_swi5 = false;
+        let mut bios_entry_cycle = 0u32;
+        let mut step_count = 0u32;
+
+        for cycle in 0..1000000u32 {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            // Detect SWI 5 call
+            if !in_swi5 && is_thumb {
+                let instr = gba.mem_read16(pc);
+                if instr == 0xDF05 {
+                    println!("Cycle {:6}: SWI 5 called at {:08X}, R0={:08X} R1={:08X}",
+                        cycle, pc, gba.regs[0], gba.regs[1]);
+                    in_swi5 = true;
+                    bios_entry_cycle = cycle;
+                    step_count = 0;
+                }
+            }
+
+            if in_swi5 {
+                step_count += 1;
+                // Trace execution in BIOS/SWI handler
+                if pc < 0x4000 && step_count <= 100 {
+                    let instr = gba.mem_read32(pc);
+                    println!("  BIOS {:08X}: {:08X} mode={} R2={:08X} R4={:08X} R12={:08X} cpsr={:08X}",
+                        pc, instr, if is_thumb { "T" } else { "A" },
+                        gba.regs[2], gba.regs[4], gba.regs[12], gba.cpsr);
+                }
+                // Check if we returned from BIOS
+                if pc >= 0x08000000 && step_count > 5 {
+                    println!("  Returned from BIOS at cycle {:6} (after {} steps), PC={:08X}",
+                        cycle, step_count, pc);
+                    in_swi5 = false;
+                    break;  // Stop after first SWI 5 completes
+                }
+            }
+
+            gba.cpu_step();
+        }
+    }
+
+    #[test]
     fn test_vblank_intr() {
         // Test VBlankIntrWait behavior: trace halts, IRQ flags, and 0x03FFFFF8
         let mut gba = make_gba("/task/dev-roms/anguna.gba");

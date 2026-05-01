@@ -399,6 +399,8 @@ impl Gba {
         self.bank_svc[0] = 0x03007FE0;
         self.bank_irq[0] = 0x03007FA0;
         self.regs[13]    = 0x03007F00;
+        self.bank_user[5] = 0x03007F00;  // user/sys R13
+        self.bank_user[6] = 0;            // user/sys R14
         self.cpsr = 0x5F;  // System mode
     }
 
