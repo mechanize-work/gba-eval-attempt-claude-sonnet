@@ -83,30 +83,19 @@ impl Gba {
     }
 
     // Non-sequential (N) instruction fetch cycles (prefetch can serve as S for ROM)
-    // When prefetch is enabled, ROM N-fetches are served from the prefetch buffer
-    // at S-cycle speed (the buffer has been filling while the CPU was executing)
+    // N-cycle instruction fetch (same as data N for ROM - no special prefetch speedup for N)
     pub(crate) fn insn_cycles_n(&self, addr: u32, width: u8) -> u32 {
-        let prefetch = (self.waitcnt >> 14) & 1 != 0;
-        if prefetch {
-            match addr >> 24 {
-                0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D => {
-                    // Prefetch buffer serves ROM instruction fetches as 1 cycle/halfword
-                    return if width == 4 { 2 } else { 1 };
-                }
-                _ => {}
-            }
-        }
         self.mem_cycles_n(addr, width)
     }
 
-    // Write cycles: EWRAM uses write buffer (1 cycle), others use normal N timing
+    // Write cycles: no write buffer - EWRAM writes take full N cycles
     pub(crate) fn write_cycles_n(&self, addr: u32, width: u8) -> u32 {
-        if (addr >> 24) == 0x02 { 1 } else { self.mem_cycles_n(addr, width) }
+        self.mem_cycles_n(addr, width)
     }
 
-    // Write cycles sequential: EWRAM uses write buffer (1 cycle), others use data S timing
+    // Write cycles sequential: no write buffer - EWRAM writes take full S cycles
     pub(crate) fn write_cycles_s(&self, addr: u32, width: u8) -> u32 {
-        if (addr >> 24) == 0x02 { 1 } else { self.mem_cycles_s(addr, width) }
+        self.mem_cycles_s(addr, width)
     }
 
     // Add cycles for a data access (N cycles, non-sequential)

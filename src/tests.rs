@@ -806,6 +806,51 @@ mod tests {
     }
 
     #[test]
+    fn test_meteorain_swi_trace() {
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut swi_counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for cycle in 0..(280896u32 * 15) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            if is_thumb {
+                let instr = gba.mem_read16(pc);
+                if instr >> 8 == 0xDF {
+                    let num = (instr & 0xFF) as u32;
+                    let cnt = swi_counts.entry(num).or_insert(0);
+                    if *cnt < 3 {
+                        println!("Cycle {cycle} (frame {}): SWI #{num} at PC={pc:08X} R0={:08X} R1={:08X}",
+                            cycle/280896, gba.regs[0], gba.regs[1]);
+                    }
+                    *cnt += 1;
+                }
+            } else {
+                let instr = gba.mem_read32(pc);
+                if (instr >> 24) & 0x0F == 0x0F {
+                    let num = instr & 0xFFFFFF;
+                    let cnt = swi_counts.entry(num).or_insert(0);
+                    if *cnt < 3 {
+                        println!("Cycle {cycle} (frame {}): ARM SWI #{num:X} at PC={pc:08X} R0={:08X}",
+                            cycle/280896, gba.regs[0]);
+                    }
+                    *cnt += 1;
+                }
+            }
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc && (old_dc & 0x80) != 0 {
+                println!("Forced blank CLEARED at cycle {cycle} (frame {})", cycle/280896);
+                break;
+            }
+        }
+        println!("SWI call counts:");
+        let mut sorted: Vec<_> = swi_counts.iter().collect();
+        sorted.sort_by_key(|&(k, _)| k);
+        for (num, cnt) in sorted {
+            println!("  SWI #{num}: {cnt} times");
+        }
+    }
+
+    #[test]
     fn test_meteorain_dma_trace() {
         let mut gba = make_gba("/task/dev-roms/meteorain.gba");
         let mut last_dma_ctrls = [0u16; 4];
