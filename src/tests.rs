@@ -266,6 +266,109 @@ mod tests {
     }
 
     #[test]
+    fn test_vram_analysis() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        for _ in 0..3 { gba.run_frame(); }
+
+        // BG palette entries (all 256)
+        println!("=== BG Palette after frame 3 ===");
+        for i in 0..256usize {
+            let lo = gba.palette[i*2];
+            let hi = gba.palette[i*2 + 1];
+            let c = lo as u16 | ((hi as u16) << 8);
+            if c != 0 {
+                let r8 = ((c & 0x1F) * 8 | (c & 0x1F) >> 2) as u8;
+                let g8 = (((c >> 5) & 0x1F) * 8 | ((c >> 5) & 0x1F) >> 2) as u8;
+                let b8 = (((c >> 10) & 0x1F) * 8 | ((c >> 10) & 0x1F) >> 2) as u8;
+                println!("  pal[{:3}] = {:04X} = #{:02X}{:02X}{:02X}", i, c, r8, g8, b8);
+            }
+        }
+
+        // Check map entries at screen base block 28 (0x0600E000)
+        let map_base = 0xE000usize;
+        println!("\n=== BG2 Map (screen base 28, first 30 rows) ===");
+        for ty in 0..20usize {
+            print!("  row {:2}: ", ty);
+            for tx in 0..30usize {
+                let off = map_base + (ty * 32 + tx) * 2;
+                let entry = gba.vram[off] as u16 | ((gba.vram[off+1] as u16) << 8);
+                let tile_num = entry & 0x3FF;
+                print!("{:4} ", tile_num);
+            }
+            println!();
+        }
+
+        // Check first few tile pixels to see what palette indices are used
+        println!("\n=== First 10 tiles' pixel palette indices ===");
+        let tile_base = 0usize;
+        for t in 0..10usize {
+            let off = tile_base + t * 64;
+            let bytes: Vec<u8> = (0..64).map(|i| gba.vram[off + i]).collect();
+            let non_zero: Vec<(usize, u8)> = bytes.iter().enumerate().filter(|(_, &b)| b != 0).map(|(i, &b)| (i, b)).collect();
+            if !non_zero.is_empty() {
+                println!("  Tile {:3}: {:?}", t, &non_zero[..non_zero.len().min(8)]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_sprite_debug() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        for _ in 0..30 { gba.run_frame(); }
+
+        // Print BG palette
+        println!("=== BG Palette (non-black entries) ===");
+        for i in 0..256usize {
+            let lo = gba.palette[i*2];
+            let hi = gba.palette[i*2 + 1];
+            let c = lo as u16 | ((hi as u16) << 8);
+            if c != 0 {
+                let r = ((c & 0x1F) as u32 * 255 / 31) as u8;
+                let g = (((c >> 5) & 0x1F) as u32 * 255 / 31) as u8;
+                let b = (((c >> 10) & 0x1F) as u32 * 255 / 31) as u8;
+                println!("  BG pal[{}] = {:04X} = RGB({},{},{})", i, c, r, g, b);
+            }
+        }
+
+        // Print OBJ palette
+        println!("=== OBJ Palette (non-black entries) ===");
+        for i in 0..256usize {
+            let lo = gba.palette[0x200 + i*2];
+            let hi = gba.palette[0x200 + i*2 + 1];
+            let c = lo as u16 | ((hi as u16) << 8);
+            if c != 0 {
+                let r = ((c & 0x1F) as u32 * 255 / 31) as u8;
+                let g = (((c >> 5) & 0x1F) as u32 * 255 / 31) as u8;
+                let b = (((c >> 10) & 0x1F) as u32 * 255 / 31) as u8;
+                println!("  OBJ pal[{}] = {:04X} = RGB({},{},{})", i, c, r, g, b);
+            }
+        }
+
+        // Print first 10 active sprites
+        println!("=== Active OBJ Sprites (first 10) ===");
+        let mut shown = 0;
+        for i in 0..128usize {
+            let attr0 = gba.oam[i*8] as u16 | ((gba.oam[i*8+1] as u16) << 8);
+            let attr1 = gba.oam[i*8+2] as u16 | ((gba.oam[i*8+3] as u16) << 8);
+            let attr2 = gba.oam[i*8+4] as u16 | ((gba.oam[i*8+5] as u16) << 8);
+            let rot_scale = (attr0 >> 8) & 1 != 0;
+            let disable = !rot_scale && (attr0 >> 9) & 1 != 0;
+            if !disable && shown < 10 {
+                let y = attr0 & 0xFF;
+                let x = attr1 & 0x1FF;
+                let tile = attr2 & 0x3FF;
+                let pal = (attr2 >> 12) & 0xF;
+                let shape = (attr0 >> 14) & 3;
+                let size = (attr1 >> 14) & 3;
+                let col256 = (attr0 >> 13) & 1;
+                println!("  OBJ[{}]: y={} x={} tile={} pal={} shape={} size={} col256={} attr0={:04X}",
+                    i, y, x, tile, pal, shape, size, col256, attr0);
+                shown += 1;
+            }
+        }
+    }
+
+    #[test]
     fn test_multiframe_irq() {
         let mut gba = make_gba("/task/dev-roms/anguna.gba");
         let mut last_if = 0u16;
