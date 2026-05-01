@@ -48,6 +48,8 @@ impl Gba {
             self.fetch_sequential = true;
             self.regs[15] = self.regs[15].wrapping_add(4);
         } else {
+            // GBATek: "B taken = 2S+1N" — extra S for the wasted decode-stage instruction
+            self.stall_cycles += self.insn_cycles_s(pc, 4);
             self.fetch_sequential = false;
         }
     }
@@ -951,6 +953,8 @@ impl Gba {
             self.fetch_sequential = true;
             self.regs[15] = self.regs[15].wrapping_add(2);
         } else {
+            // GBATek: "B taken = 2S+1N" — extra S for the wasted decode-stage instruction
+            self.stall_cycles += self.insn_cycles_s(pc, 2);
             self.fetch_sequential = false;
         }
     }

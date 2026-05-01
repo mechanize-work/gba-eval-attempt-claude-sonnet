@@ -1635,13 +1635,32 @@ mod tests {
     }
 
     #[test]
+    fn test_meteorain_waitcnt_writes() {
+        // Check all WAITCNT writes to understand initial timing
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut last_wc = gba.waitcnt;
+        println!("Initial WAITCNT: {:04X}", last_wc);
+        for _ in 0..(280896u64 * 15) as u32 {
+            if gba.waitcnt != last_wc {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("WAITCNT {:04X} -> {:04X} at cycle={} PC={:08X}",
+                    last_wc, gba.waitcnt, gba.cycles, pc);
+                last_wc = gba.waitcnt;
+            }
+            gba.tick_one_cycle();
+        }
+        println!("Final WAITCNT: {:04X}", gba.waitcnt);
+    }
+
+    #[test]
     fn test_meteorain_waitcnt_timing() {
         // Check WAITCNT value when the ROM search loop runs
         // The loop reads from ROM, so timing depends on WAITCNT
         let mut gba = make_gba("/task/dev-roms/meteorain.gba");
 
         // Run to just before dark blue starts
-        let target = 2_400_000u64;
+        let target = 4_000_000u64;
         while (gba.cycles as u64) < target {
             gba.tick_one_cycle();
         }
@@ -1746,7 +1765,7 @@ mod tests {
             gba.tick_one_cycle();
         }
 
-        let end_cycle = 12_000_000u64;
+        let end_cycle = 25_000_000u64;
         let mut vblank_count = 0u32;
         let mut last_vcount = gba.vcount;
         let mut last_pal0: u16 = 0;
@@ -1785,5 +1804,76 @@ mod tests {
 
             gba.tick_one_cycle();
         }
+    }
+
+    #[test]
+    fn test_meteorain_loop_insn_cycles() {
+        // Trace per-instruction cycle costs in the ROM search loop at 0x08016FA6
+        // to understand the 25% gap between our timing and oracle's
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        // Run to the loop
+        let target = 4_000_000u64;
+        while (gba.cycles as u64) < target {
+            gba.tick_one_cycle();
+        }
+
+        // Wait until we hit the loop entry point
+        loop {
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                if is_thumb {
+                    let pc = gba.regs[15].wrapping_sub(4);
+                    if pc == 0x08016FD2 { break; }
+                }
+            }
+            gba.tick_one_cycle();
+        }
+
+        // Trace one full iteration: record (pc, stall_cycles) for each instruction
+        let mut trace: Vec<(u32, u32)> = Vec::new();
+        let iter_start_cycle = gba.cycles;
+        let mut iteration_done = false;
+
+        for _ in 0..10_000 {
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                if is_thumb {
+                    let pc = gba.regs[15].wrapping_sub(4);
+                    gba.tick_one_cycle();
+                    // stall_cycles now has the cost of that instruction
+                    let sc = gba.stall_cycles;
+                    trace.push((pc, sc));
+                    // Check if we've returned to loop top (one iteration done)
+                    if pc == 0x08016FD2 && trace.len() > 1 {
+                        iteration_done = true;
+                        break;
+                    }
+                    continue;
+                }
+            }
+            gba.tick_one_cycle();
+        }
+
+        let iter_cycles = gba.cycles as i64 - iter_start_cycle as i64;
+        println!("Loop iteration trace ({} instructions, {} cycles):", trace.len(), iter_cycles);
+
+        // Aggregate by PC to see total cycles at each address
+        let mut pc_cycles: std::collections::HashMap<u32, (u32, u32)> = std::collections::HashMap::new();
+        for &(pc, sc) in &trace {
+            let e = pc_cycles.entry(pc).or_insert((0, 0));
+            e.0 += 1;  // count
+            e.1 += sc; // total stall cycles
+        }
+
+        // Print in PC order
+        let mut sorted: Vec<_> = pc_cycles.into_iter().collect();
+        sorted.sort_by_key(|e| e.0);
+        for (pc, (count, cycles)) in &sorted {
+            println!("  PC={:08X}: {} insns, {} cycles ({:.1} avg)",
+                pc, count, cycles, *cycles as f64 / *count as f64);
+        }
+
+        println!("Iteration done: {}", iteration_done);
     }
 }
