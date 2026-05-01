@@ -727,6 +727,246 @@ mod tests {
 
 
     #[test]
+    fn test_meteorain_io_reads() {
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        // Trace all I/O reads (4MHz range) before forced blank clears
+        // We instrument by checking if PC is doing an LDR from I/O space
+
+        let mut io_read_counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+
+        for cycle in 0..(280896u32 * 15) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            if is_thumb {
+                let instr = gba.mem_read16(pc);
+                // Format 9: LDR Rd,[Rb,#offset] (bits 15:11 = 01101)
+                if (instr >> 11) == 0b01101 {
+                    let rb = ((instr >> 3) & 7) as usize;
+                    let offset = (((instr >> 6) & 0x1F) * 4) as u32;
+                    let addr = gba.regs[rb].wrapping_add(offset);
+                    if (addr >> 24) == 0x04 {
+                        *io_read_counts.entry(addr).or_insert(0) += 1;
+                    }
+                }
+                // Format 7: LDR Rd,[Rb,Ro]
+                if (instr >> 9) == 0b0101100 {
+                    let ro = ((instr >> 6) & 7) as usize;
+                    let rb = ((instr >> 3) & 7) as usize;
+                    let addr = gba.regs[rb].wrapping_add(gba.regs[ro]);
+                    if (addr >> 24) == 0x04 {
+                        *io_read_counts.entry(addr).or_insert(0) += 1;
+                    }
+                }
+                // LDRH Rd,[Rb,#offset] (format 10: bits 15:11 = 10001)
+                if (instr >> 11) == 0b10001 {
+                    let rb = ((instr >> 3) & 7) as usize;
+                    let offset = (((instr >> 6) & 0x1F) * 2) as u32;
+                    let addr = gba.regs[rb].wrapping_add(offset);
+                    if (addr >> 24) == 0x04 {
+                        *io_read_counts.entry(addr).or_insert(0) += 1;
+                    }
+                }
+                // LDRB Rd,[Rb,#offset] (format 9b: bits 15:11 = 01111)
+                if (instr >> 11) == 0b01111 {
+                    let rb = ((instr >> 3) & 7) as usize;
+                    let offset = (((instr >> 6) & 0x1F)) as u32;
+                    let addr = gba.regs[rb].wrapping_add(offset);
+                    if (addr >> 24) == 0x04 {
+                        *io_read_counts.entry(addr).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc && (old_dc & 0x80) != 0 {
+                println!("Forced blank CLEARED at cycle {} (frame {})", cycle, cycle/280896);
+                break;
+            }
+        }
+
+        let mut sorted: Vec<(u32, u32)> = io_read_counts.into_iter().collect();
+        sorted.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+        println!("I/O reads before forced blank clear (top 20):");
+        for (addr, count) in sorted.iter().take(20) {
+            let name = match addr {
+                0x04000000 => "DISPCNT",
+                0x04000004 => "DISPSTAT",
+                0x04000006 => "VCOUNT",
+                0x04000130 => "KEYINPUT",
+                0x04000200 => "IE",
+                0x04000202 => "IF",
+                0x04000204 => "WAITCNT",
+                0x04000208 => "IME",
+                _ => "?",
+            };
+            println!("  0x{addr:08X} ({name}): {count} reads");
+        }
+    }
+
+    #[test]
+    fn test_meteorain_dma_trace() {
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut last_dma_ctrls = [0u16; 4];
+        for cycle in 0..(280896u32 * 15) {
+            for ch in 0..4 {
+                let ctrl = gba.dma[ch].ctrl;
+                let was_enabled = last_dma_ctrls[ch] >> 15 != 0;
+                let now_enabled = ctrl >> 15 != 0;
+                if now_enabled && !was_enabled {
+                    let src = gba.dma[ch].src_raw;
+                    let dst = gba.dma[ch].dst_raw;
+                    let cnt = gba.dma[ch].cnt_raw;
+                    let timing = (ctrl >> 12) & 3;
+                    let width = if (ctrl >> 10) & 1 != 0 { 32 } else { 16 };
+                    println!("Cycle {:7} (frame {}): DMA{} ENABLED src=0x{:08X} dst=0x{:08X} cnt={} timing={} width={}",
+                        cycle, cycle/280896, ch, src, dst, cnt, timing, width);
+                }
+                last_dma_ctrls[ch] = ctrl;
+            }
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc && (old_dc & 0x80) != 0 {
+                println!("Forced blank CLEARED at cycle {} (frame {})", cycle, cycle/280896);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn test_meteorain_pre_clear_trace() {
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut last_dispcnt = gba.dispcnt;
+
+        // Run to just before cycle 1,200,000 quickly
+        for _ in 0..1200000u32 {
+            gba.tick_one_cycle();
+        }
+
+        println!("At cycle 1200000: PC={:08X} DISPCNT={:04X} halted={}",
+            gba.regs[15].wrapping_sub(if (gba.cpsr & 0x20) != 0 { 4 } else { 8 }),
+            gba.dispcnt, gba.halted);
+
+        // Now trace closely until forced blank clears
+        for cycle in 1200000u32..1300000 {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            // Print occasional PC to see what code is running
+            if cycle % 10000 == 0 {
+                println!("Cycle {cycle}: PC={pc:08X} halted={} DISPCNT={:04X} VCOUNT={}",
+                    gba.halted, gba.dispcnt, gba.vcount);
+            }
+
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc {
+                println!("Cycle {cycle}: DISPCNT 0x{old_dc:04X} -> 0x{:04X} (frame {}), PC at time={pc:08X}",
+                    gba.dispcnt, cycle/280896);
+                if (old_dc & 0x80) != 0 {
+                    println!("Forced blank CLEARED at cycle {cycle}!");
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_meteorain_vcount_trace() {
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut last_vcount_read_pc = 0u32;
+        let mut vcount_reads = 0u64;
+        let mut last_dispcnt = gba.dispcnt;
+
+        // Instrument io_read16 equivalent: we need to trace VCOUNT (0x04000006) reads
+        // Strategy: run cycle by cycle and check VCOUNT reads by checking PC and instructions
+        for cycle in 0..(280896u32 * 15) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            // Check if this instruction is an LDR/LDRH/LDRB from VCOUNT address 0x04000006
+            // In Thumb: LDR Rd, [Rb, Ro] (format 7) or LDR Rd, [Rb, #offset]
+            // In ARM: LDR Rd, [Rb, #offset]
+            // The game typically loads base into register then LDR from [Rb, #6]
+            // Check if PC is in the "poll VBLANK" region (after copy loop)
+            // We'll watch VCOUNT by checking if a read from 0x04000006 is happening
+            // by detecting if the PC is in a busy-wait pattern
+
+            if is_thumb {
+                let instr = gba.mem_read16(pc);
+                // Look for: LDR Rd, [Rb, #offset] (format 9: 0110 1 xxx xxxx xxxx)
+                // Offset field is bits [10:6], Rb=[5:3], Rd=[2:0]
+                // For LDR (bit12=1,bit11=0): 0110_1
+                // Actually trace ANY IO read by watching if the instruction loads from 0x04000000 range
+                // Much simpler: just watch PC patterns for tight loops
+                // Format: 0110_1 off Rb Rd = LDR Rd,[Rb,#off*4]
+                if (instr >> 11) == 0b01101 {
+                    let rb = ((instr >> 3) & 7) as usize;
+                    let offset = (((instr >> 6) & 0x1F) * 4) as u32;
+                    let base = gba.regs[rb];
+                    let addr = base.wrapping_add(offset);
+                    if addr == 0x04000006 {
+                        if vcount_reads < 20 || (vcount_reads % 1000 == 0) {
+                            println!("Cycle {cycle} (frame {}): VCOUNT read from PC={:08X}, VCOUNT={}, reads_so_far={}",
+                                cycle/280896, pc, gba.vcount, vcount_reads);
+                        }
+                        vcount_reads += 1;
+                        last_vcount_read_pc = pc;
+                    }
+                }
+                // LDR Rd,[Rb,Ro] format: 0101 100 Ro Rb Rd
+                if (instr >> 9) == 0b0101100 {
+                    let ro = ((instr >> 6) & 7) as usize;
+                    let rb = ((instr >> 3) & 7) as usize;
+                    let addr = gba.regs[rb].wrapping_add(gba.regs[ro]);
+                    if addr == 0x04000006 {
+                        if vcount_reads < 20 || (vcount_reads % 1000 == 0) {
+                            println!("Cycle {cycle} (frame {}): VCOUNT read(reg) from PC={:08X}, VCOUNT={}, reads_so_far={}",
+                                cycle/280896, pc, gba.vcount, vcount_reads);
+                        }
+                        vcount_reads += 1;
+                        last_vcount_read_pc = pc;
+                    }
+                }
+            } else {
+                let instr = gba.mem_read32(pc);
+                // ARM LDR: cond 01 I P U B W L Rn Rd offset12
+                // bit[20]=1 (load), bit[26]=0, bit[27]=0 -> LDR
+                if (instr & 0x0C100000) == 0x04100000 {
+                    let rn = ((instr >> 16) & 0xF) as usize;
+                    let base = gba.regs[rn];
+                    // Simple immediate offset case
+                    if (instr >> 25) & 1 == 0 {
+                        let offset = instr & 0xFFF;
+                        let up = (instr >> 23) & 1;
+                        let addr = if up != 0 { base.wrapping_add(offset) } else { base.wrapping_sub(offset) };
+                        if addr == 0x04000006 || (addr & 0xFFFFFFFE) == 0x04000006 {
+                            if vcount_reads < 20 {
+                                println!("Cycle {cycle} (frame {}): ARM VCOUNT read from PC={:08X}, VCOUNT={}",
+                                    cycle/280896, pc, gba.vcount);
+                            }
+                            vcount_reads += 1;
+                        }
+                    }
+                }
+            }
+
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc && (old_dc & 0x80) != 0 {
+                println!("Cycle {cycle} (frame {}): Forced blank CLEARED! DISPCNT 0x{:04X} -> 0x{:04X}",
+                    cycle/280896, old_dc, gba.dispcnt);
+                println!("Total VCOUNT reads before clear: {vcount_reads}, last VCOUNT read PC: {:08X}", last_vcount_read_pc);
+                break;
+            }
+        }
+        if vcount_reads == 0 {
+            println!("No VCOUNT reads detected");
+        }
+    }
+
+    #[test]
     fn test_meteorain_loop_trace() {
         let mut gba = make_gba("/task/dev-roms/meteorain.gba");
 
