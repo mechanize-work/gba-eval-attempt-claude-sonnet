@@ -2017,8 +2017,12 @@ mod tests {
                     continue;
                 } else {
                     // ARM mode instruction (e.g., IRQ handler)
+                    let arm_pc = gba.regs[15].wrapping_sub(8);
                     gba.tick_one_cycle();
                     arm_cycles += gba.stall_cycles as u64;
+                    if arm_insns < 80 {
+                        println!("  ARM PC=0x{:08X} stall={}", arm_pc, gba.stall_cycles);
+                    }
                     arm_insns += 1;
                     continue;
                 }
