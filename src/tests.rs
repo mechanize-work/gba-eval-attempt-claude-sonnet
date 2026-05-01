@@ -160,6 +160,65 @@ mod tests {
     }
 
     #[test]
+    fn test_vblank_intr() {
+        // Test VBlankIntrWait behavior: trace halts, IRQ flags, and 0x03FFFFF8
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let mut halt_count = 0u32;
+        let mut irq_count = 0u32;
+        let mut last_if = 0u16;
+        let mut last_halted = false;
+        let mut last_dispstat = 0u16;
+        let mut last_ie = 0u16;
+
+        for cycle in 0..280896u32 {
+            // Track halted state changes
+            if gba.halted != last_halted {
+                if gba.halted {
+                    halt_count += 1;
+                    if halt_count <= 10 {
+                        println!("Cycle {:6}: CPU HALTED #{}, IE={:04X} IF={:04X} DISPSTAT={:04X} IME={:08X}",
+                            cycle, halt_count, gba.ie, gba.if_, gba.dispstat, gba.ime);
+                    }
+                } else if last_halted {
+                    if halt_count <= 10 {
+                        println!("Cycle {:6}: CPU WOKE, IE={:04X} IF={:04X}", cycle, gba.ie, gba.if_);
+                    }
+                }
+                last_halted = gba.halted;
+            }
+
+            // Track IF changes
+            if gba.if_ != last_if {
+                if irq_count < 10 {
+                    println!("Cycle {:6}: IF changed {:04X} -> {:04X}", cycle, last_if, gba.if_);
+                }
+                if gba.if_ != 0 { irq_count += 1; }
+                last_if = gba.if_;
+            }
+
+            // Track DISPSTAT bit 3 (VBlank IRQ enable) and other bits
+            if gba.dispstat != last_dispstat {
+                println!("Cycle {:6}: DISPSTAT {:04X} -> {:04X}", cycle, last_dispstat, gba.dispstat);
+                last_dispstat = gba.dispstat;
+            }
+
+            // Track IE changes
+            if gba.ie != last_ie {
+                println!("Cycle {:6}: IE {:04X} -> {:04X}", cycle, last_ie, gba.ie);
+                last_ie = gba.ie;
+            }
+
+            gba.tick_one_cycle();
+        }
+        println!("Total halts: {}, IRQ events: {}", halt_count, irq_count);
+        println!("Final: IE={:04X} IF={:04X} IME={:08X} halted={} DISPSTAT={:04X}",
+            gba.ie, gba.if_, gba.ime, gba.halted, gba.dispstat);
+        println!("0x03007FFC = {:08X}", gba.mem_read32(0x03007FFC));
+        println!("0x03FFFFF8 = {:08X}", gba.mem_read32(0x03FFFFF8));
+        println!("palette[0..8]: {:?}", &gba.palette[0..8]);
+    }
+
+    #[test]
     fn test_dma_trace() {
         let mut gba = make_gba("/task/dev-roms/anguna.gba");
         // Trace all DMA transfers in the first frame
