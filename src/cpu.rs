@@ -48,21 +48,6 @@ impl Gba {
         self.branch_taken = false;
         self.arm_execute(instr);
 
-        // Prefetch Disable Bug (GBATek): when WAITCNT prefetch is disabled and the instruction
-        // is in GamePak ROM and has internal cycles (LDR/LDM/SWP/shift-by-reg/MUL), the opcode
-        // fetch changes from S to N.
-        if was_sequential && self.insn_has_icycles {
-            let prefetch_enabled = (self.waitcnt >> 14) & 1 != 0;
-            if !prefetch_enabled {
-                let region = pc >> 24;
-                if region >= 0x08 && region <= 0x0D {
-                    let n = self.insn_cycles_n(pc, 4);
-                    let s = self.insn_cycles_s(pc, 4);
-                    self.stall_cycles += n.saturating_sub(s);
-                }
-            }
-        }
-
         if !self.branch_taken {
             self.fetch_sequential = !self.rom_data_accessed;
             self.regs[15] = self.regs[15].wrapping_add(4);
@@ -991,21 +976,6 @@ impl Gba {
         let instr = self.mem_read16(pc) as u32;
         self.branch_taken = false;
         self.thumb_execute(instr);
-
-        // Prefetch Disable Bug (GBATek): when WAITCNT prefetch is disabled and the instruction
-        // is in GamePak ROM and has internal cycles (LDR/LDM/POP/shift-by-reg/MUL), the opcode
-        // fetch changes from S to N.
-        if was_sequential && self.insn_has_icycles {
-            let prefetch_enabled = (self.waitcnt >> 14) & 1 != 0;
-            if !prefetch_enabled {
-                let region = pc >> 24;
-                if region >= 0x08 && region <= 0x0D {
-                    let n = self.insn_cycles_n(pc, 2);
-                    let s = self.insn_cycles_s(pc, 2);
-                    self.stall_cycles += n.saturating_sub(s);
-                }
-            }
-        }
 
         if !self.branch_taken {
             // If current instruction accessed ROM data, bus ends at data addr → next fetch is N

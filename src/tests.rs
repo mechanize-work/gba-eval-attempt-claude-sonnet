@@ -4014,6 +4014,41 @@ mod tests {
     }
 
     #[test]
+    fn test_another_world_vblank_palette_timing() {
+        // Trace VBlank timing and palette changes to understand 3-frame animation lag.
+        // Forced blank clears at frame 4 scanline 177. First animation at frame 7.
+        // Why not frame 5?
+        let mut gba = make_gba("/task/dev-roms/another-world.gba");
+        let mut last_scanline = gba.scanline;
+        let mut vblank_num = 0u32;
+        let mut last_palette0 = 0u32;
+
+        // Run past first 5 frames to get into the animation setup phase
+        while gba.cycles < 280896 * 9 {
+            // Track VBlanks
+            if gba.scanline == 160 && last_scanline != 160 {
+                vblank_num += 1;
+                // Print palette[0] at each VBlank
+                let pal0 = (gba.palette[0] as u32) | ((gba.palette[1] as u32) << 8);
+                println!("VBlank {}: cycle={} frame={} palette[0]={:04X}", vblank_num, gba.cycles, gba.cycles / 280896, pal0);
+            }
+            last_scanline = gba.scanline;
+
+            // Track palette changes
+            let pal0 = (gba.palette[0] as u32) | ((gba.palette[1] as u32) << 8);
+            if pal0 != last_palette0 && last_palette0 != 0 {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("  Palette[0] changed: {:04X}->{:04X} at cycle={} scanline={} PC={:08X}",
+                    last_palette0, pal0, gba.cycles, gba.scanline, pc);
+            }
+            last_palette0 = pal0;
+
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
     fn test_another_world_animation_timing() {
         // Trace when each animation step starts, measuring cycles per step.
         // Goal: understand why mine is 3 frames behind oracle (oracle starts animation at frame 4).
@@ -4038,6 +4073,52 @@ mod tests {
                 last_step_cycle = cycle;
                 last_colors = current_colors;
             }
+        }
+    }
+
+    #[test]
+    fn test_another_world_init_profile() {
+        // Profile cycle distribution during another-world init (up to first DISPCNT change).
+        // Goal: understand why mine is 3 frames behind oracle (oracle animates at frame 4, mine at 7).
+        let mut gba = make_gba("/task/dev-roms/another-world.gba");
+        let mut region_cycles: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut prev_cycles = gba.cycles;
+        let mut last_pc = gba.regs[15];
+        let mut last_dispcnt = gba.dispcnt;
+
+        for _ in 0..5_000_000_000u64 {
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                let elapsed = gba.cycles - prev_cycles;
+                if elapsed > 0 {
+                    *region_cycles.entry(last_pc >> 16).or_insert(0) += elapsed as u64;
+                    prev_cycles = gba.cycles;
+                    last_pc = pc;
+                }
+
+                if gba.dispcnt != last_dispcnt {
+                    println!("DISPCNT changed at cycle={} frame={}", gba.cycles, gba.cycles / 280896);
+                    break;
+                }
+                last_dispcnt = gba.dispcnt;
+            }
+            gba.tick_one_cycle();
+        }
+
+        let total: u64 = region_cycles.values().sum();
+        let mut sorted: Vec<(u32, u64)> = region_cycles.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("Cycle distribution up to DISPCNT change (total={}):", total);
+        for (region, cycles) in sorted.iter().take(20) {
+            let label = match *region {
+                0x0000 => "BIOS",
+                0x0200 | 0x0300 => "WRAM/IWRAM",
+                0x0800..=0x0D00 => "ROM",
+                _ => "OTHER",
+            };
+            println!("  PC 0x{:04X}xxxx ({}): {} cycles ({:.1}%)",
+                region, label, cycles, 100.0 * *cycles as f64 / total as f64);
         }
     }
 
