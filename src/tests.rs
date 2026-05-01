@@ -3699,4 +3699,74 @@ mod tests {
             gba.tick_one_cycle();
         }
     }
+
+    #[test]
+    fn test_meteorain_init_pc_profile() {
+        // Profile what code runs during init (0 to VBlankIntrWait call at ~3.97M cycles)
+        // Group cycles by PC region (page = PC >> 8) to see where time is spent
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut region_cycles: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut prev_cycles = 0u64;
+        let mut last_pc = 0u32;
+        let target = 4_000_000u64;
+
+        while (gba.cycles as u64) < target {
+            // When CPU executes an instruction, attribute stall cycles to that PC region
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                // Attribute cycles since last instruction to last_pc
+                let elapsed = gba.cycles - prev_cycles;
+                *region_cycles.entry(last_pc >> 12).or_insert(0) += elapsed;
+                last_pc = pc;
+                prev_cycles = gba.cycles;
+            }
+            gba.tick_one_cycle();
+        }
+
+        // Print top regions sorted by cycles
+        let mut sorted: Vec<(u32, u64)> = region_cycles.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("Top PC regions (4KB pages) during init ({} cycles total):", target);
+        for (region, cycles) in sorted.iter().take(30) {
+            println!("  PC=0x{:07X}xxx: {} cycles ({:.1}%)",
+                region, cycles, 100.0 * *cycles as f64 / target as f64);
+        }
+    }
+
+    #[test]
+    fn test_meteorain_init_timing_diff() {
+        // Identify exactly when during init our emulator diverges from oracle timing.
+        // Strategy: track VBlank count and cycle at which each VBlank occurs.
+        // Compare with oracle's expected timing (dark blue at frame 12).
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut vblank_count = 0u32;
+        let mut last_scanline = 0u32;
+        let target_cycles = 4_300_000u64;
+        let mut dark_blue_found = false;
+        let mut last_pal0: u16 = 0xFFFF;
+
+        while (gba.cycles as u64) < target_cycles {
+            // VBlank detection
+            if gba.scanline == 160 && last_scanline == 159 {
+                vblank_count += 1;
+                println!("VBlank {}: cycle={} (frame {} + {})",
+                    vblank_count, gba.cycles, gba.cycles/280896,
+                    gba.cycles % 280896);
+            }
+            last_scanline = gba.scanline;
+
+            // Palette change detection
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                println!("Palette[0] change: {:04X}->{:04X} at cycle={} (frame {}, vblank_count={})",
+                    last_pal0, pal0, gba.cycles, gba.cycles/280896, vblank_count);
+                last_pal0 = pal0;
+                if pal0 == 0x0800 { dark_blue_found = true; break; }
+            }
+
+            gba.tick_one_cycle();
+        }
+        println!("dark_blue_found={}, total cycles={}", dark_blue_found, gba.cycles);
+    }
 }
