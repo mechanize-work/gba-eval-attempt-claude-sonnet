@@ -3,13 +3,20 @@ use crate::Gba;
 impl Gba {
     // ===== Wait State Cycle Calculations =====
 
+    // EWRAM 32-bit N/S cycles based on memcnt bits 24-27 (wait states: 15-bits, min 0x0E=1ws→2cyc 8/16bit, 4cyc 32bit)
+    fn ewram_cycles(&self, width: u8) -> u32 {
+        let ws = (self.memcnt >> 24) & 0xF;  // 0-14 = 15..1 wait states, 15=lockup
+        let cyc = if ws >= 14 { 2 } else { 15 - ws };  // cycles for 8/16-bit
+        if width == 4 { cyc * 2 } else { cyc }
+    }
+
     // Non-sequential (N) access cycles for given address and width (1=8bit, 2=16bit, 4=32bit)
     pub(crate) fn mem_cycles_n(&self, addr: u32, width: u8) -> u32 {
         let wc = self.waitcnt;
         const WS_N: [u32; 4] = [4, 3, 2, 8];
         match addr >> 24 {
             0x00 => 1,                                          // BIOS
-            0x02 => if width == 4 { 6 } else { 3 },            // WRAM 256K (16-bit bus)
+            0x02 => self.ewram_cycles(width),                   // WRAM 256K (16-bit bus)
             0x03 | 0x04 | 0x07 => 1,                           // IRAM, I/O, OAM
             0x05 | 0x06 => if width == 4 { 2 } else { 1 },     // Palette, VRAM (16-bit bus)
             0x08 | 0x09 => {                                    // ROM WS0
@@ -37,7 +44,7 @@ impl Gba {
         let wc = self.waitcnt;
         match addr >> 24 {
             0x00 => 1,
-            0x02 => if width == 4 { 6 } else { 3 },
+            0x02 => self.ewram_cycles(width),
             0x03 | 0x04 | 0x07 => 1,
             0x05 | 0x06 => if width == 4 { 2 } else { 1 },
             0x08 | 0x09 => {
@@ -141,6 +148,10 @@ impl Gba {
 
     pub(crate) fn mem_read32(&mut self, addr: u32) -> u32 {
         let addr = addr & !3;  // align
+        // Special case for 0x04000800 (EWRAM wait control, mirrored every 64K)
+        if (addr >> 24) == 0x04 && (addr & 0xFFFF) == 0x0800 {
+            return self.memcnt;
+        }
         let b0 = self.mem_read8(addr) as u32;
         let b1 = self.mem_read8(addr + 1) as u32;
         let b2 = self.mem_read8(addr + 2) as u32;
@@ -242,7 +253,12 @@ impl Gba {
         let addr = addr & !3;
         match (addr & 0x0FFFFFFF) >> 24 {
             0x04 => {
-                self.io_write32(addr & 0x3FF, val);
+                // 0x04000800 is mirrored every 64K (lower 16 bits = 0x0800)
+                if (addr & 0xFFFF) == 0x0800 {
+                    self.memcnt = val & 0xF000_00FF;
+                } else {
+                    self.io_write32(addr & 0x3FF, val);
+                }
             }
             _ => {
                 self.mem_write16(addr, val as u16);

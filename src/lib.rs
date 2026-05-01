@@ -124,6 +124,7 @@ pub(crate) struct Gba {
 
     // === MISC ===
     pub waitcnt:  u16,
+    pub memcnt:   u32,  // 0x04000800: internal memory control (EWRAM wait states)
     pub postflg:  u8,
     pub haltcnt:  u8,
     pub cycles:   u64,  // total cycles
@@ -315,7 +316,7 @@ impl Gba {
             keyinput: 0x03FF,  // all buttons released (active-low)
             keycnt: 0,
 
-            waitcnt: 0, postflg: 0, haltcnt: 0,
+            waitcnt: 0, memcnt: 0x0D000020, postflg: 0, haltcnt: 0,
             cycles: 0, frame_cycles: 0,
             dma_pending: 0,
             branch_taken: false,
@@ -399,7 +400,7 @@ impl Gba {
         self.keyinput = 0x03FF;
         self.keycnt = 0;
         // Real GBA BIOS sets WAITCNT=0x4317 (WS0=3,1; WS1=8,1; WS2=8,1; prefetch on; sram=8)
-        self.waitcnt = 0x4317; self.postflg = 0; self.haltcnt = 0;
+        self.waitcnt = 0x4317; self.memcnt = 0x0D000020; self.postflg = 0; self.haltcnt = 0;
         self.cycles = 0; self.frame_cycles = 0;
         self.dma_pending = 0;
         self.branch_taken = false;

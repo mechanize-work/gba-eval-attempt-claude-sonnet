@@ -1395,4 +1395,64 @@ mod tests {
             gba.tick_one_cycle();
         }
     }
+
+    #[test]
+    fn test_anguna_trace_init() {
+        // Trace anguna's initialization to find 0x04000800 writes and understand timing
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let mut insn_count = 0u32;
+        let mut last_pc = 0xFFFFFFFFu32;
+
+        for _ in 0..(280896u32 * 2) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            if pc != last_pc {
+                // New instruction
+                let mode = if is_thumb { "T" } else { "A" };
+
+                // Check for writes to IO region (we'll detect via the PC trace)
+                // Print first 200 distinct instructions
+                if insn_count < 200 {
+                    let r = &gba.regs;
+                    println!("{:08X}: {} r0={:08X} r1={:08X} r2={:08X} r3={:08X} r4={:08X} r13={:08X} r14={:08X}",
+                        pc, mode, r[0], r[1], r[2], r[3], r[4], r[13], r[14]);
+                }
+                insn_count += 1;
+                last_pc = pc;
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_anguna_800_writes() {
+        // Check if anguna writes to 0x04000800 (EWRAM wait state control)
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+
+        // Instrument by monitoring writes. We'll check bus_write via a wrapper.
+        // Instead, just trace all writes in the first 100K cycles
+        struct WriteMonitor {
+            cycles: u32,
+        }
+
+        // Simple approach: scan for STR/STRH/STRB patterns that write to 0x04000800
+        // We'll just run and watch mem_write calls. Since we can't easily hook,
+        // let's trace and look for the sequence that sets up 0x04000800.
+
+        // Actually let's just check: does the game change EWRAM timing?
+        // Run 100K cycles and check for writes to addresses around 0x04000800
+        for _ in 0..(280896u32 * 5) {
+            let old_dispcnt = gba.dispcnt;
+            gba.tick_one_cycle();
+            if old_dispcnt != gba.dispcnt {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("DISPCNT changed at cycle {} PC={:08X}: {:04X} -> {:04X}",
+                    gba.cycles, pc, old_dispcnt, gba.dispcnt);
+                if gba.dispcnt & 0x80 == 0 { break; }
+            }
+        }
+    }
 }
