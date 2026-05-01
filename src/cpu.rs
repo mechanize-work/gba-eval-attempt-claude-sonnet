@@ -35,9 +35,9 @@ impl Gba {
 
         // Instruction fetch cycles (S or N based on whether we just branched)
         let fetch_cyc = if self.fetch_sequential {
-            self.mem_cycles_s(pc, 4)
+            self.insn_cycles_s(pc, 4)
         } else {
-            self.mem_cycles_n(pc, 4)
+            self.insn_cycles_n(pc, 4)
         };
         self.stall_cycles += fetch_cyc;
 
@@ -446,12 +446,12 @@ impl Gba {
         let addr = self.reg(rn);
 
         if byte {
-            self.stall_cycles += self.mem_cycles_n(addr, 1) + self.mem_cycles_n(addr, 1) + 1;
+            self.stall_cycles += self.mem_cycles_n(addr, 1) + self.write_cycles_n(addr, 1) + 1;
             let mem = self.mem_read8(addr);
             self.mem_write8(addr, self.reg(rm) as u8);
             self.regs[rd as usize] = mem as u32;
         } else {
-            self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + self.mem_cycles_n(addr & !3, 4) + 1;
+            self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + self.write_cycles_n(addr & !3, 4) + 1;
             let mem = self.mem_read32_rotate(addr);
             self.mem_write32(addr & !3, self.reg(rm));
             self.regs[rd as usize] = mem;
@@ -507,7 +507,7 @@ impl Gba {
             self.regs[rd as usize] = val;
         } else {
             // STRH (sh=1)
-            self.stall_cycles += self.mem_cycles_n(addr & !1, 2);
+            self.stall_cycles += self.write_cycles_n(addr & !1, 2);
             self.mem_write16(addr & !1, self.reg(rd) as u16);
         }
 
@@ -567,11 +567,11 @@ impl Gba {
         } else {
             let src = self.reg(rd);  // R15 = current PC + 12 in STR
             if b {
-                let cyc = self.mem_cycles_n(addr, 1);
+                let cyc = self.write_cycles_n(addr, 1);
                 self.stall_cycles += cyc;
                 self.mem_write8(addr, src as u8);
             } else {
-                let cyc = self.mem_cycles_n(addr & !3, 4);
+                let cyc = self.write_cycles_n(addr & !3, 4);
                 self.stall_cycles += cyc;
                 self.mem_write32(addr & !3, src);
             }
@@ -653,7 +653,7 @@ impl Gba {
             let mut seq = false;
             for i in 0..16u32 {
                 if (rlist >> i) & 1 != 0 {
-                    let cyc = if seq { self.mem_cycles_s(addr & !3, 4) } else { self.mem_cycles_n(addr & !3, 4) };
+                    let cyc = if seq { self.write_cycles_s(addr & !3, 4) } else { self.write_cycles_n(addr & !3, 4) };
                     self.stall_cycles += cyc;
                     seq = true;
                     let val = if s {
@@ -938,9 +938,9 @@ impl Gba {
 
         // Instruction fetch cycles (S or N based on whether we just branched)
         let fetch_cyc = if self.fetch_sequential {
-            self.mem_cycles_s(pc, 2)
+            self.insn_cycles_s(pc, 2)
         } else {
-            self.mem_cycles_n(pc, 2)
+            self.insn_cycles_n(pc, 2)
         };
         self.stall_cycles += fetch_cyc;
 
@@ -1303,10 +1303,10 @@ impl Gba {
                 }
             } else {
                 if b {
-                    self.stall_cycles += self.mem_cycles_n(addr, 1);
+                    self.stall_cycles += self.write_cycles_n(addr, 1);
                     self.mem_write8(addr, self.regs[rd as usize] as u8);
                 } else {
-                    self.stall_cycles += self.mem_cycles_n(addr & !3, 4);
+                    self.stall_cycles += self.write_cycles_n(addr & !3, 4);
                     self.mem_write32(addr & !3, self.regs[rd as usize]);
                 }
             }
@@ -1320,7 +1320,7 @@ impl Gba {
             let addr = self.regs[rb as usize].wrapping_add(self.regs[ro as usize]);
             if !s && !h {
                 // STRH
-                self.stall_cycles += self.mem_cycles_n(addr & !1, 2);
+                self.stall_cycles += self.write_cycles_n(addr & !1, 2);
                 self.mem_write16(addr & !1, self.regs[rd as usize] as u16);
             } else if s && !h {
                 // LDRSB
@@ -1365,10 +1365,10 @@ impl Gba {
             }
         } else {
             if b {
-                self.stall_cycles += self.mem_cycles_n(addr, 1);
+                self.stall_cycles += self.write_cycles_n(addr, 1);
                 self.mem_write8(addr, self.regs[rd as usize] as u8);
             } else {
-                self.stall_cycles += self.mem_cycles_n(addr & !3, 4);
+                self.stall_cycles += self.write_cycles_n(addr & !3, 4);
                 self.mem_write32(addr & !3, self.regs[rd as usize]);
             }
         }
@@ -1386,7 +1386,7 @@ impl Gba {
             self.stall_cycles += self.mem_cycles_n(addr & !1, 2) + 1;
             self.regs[rd as usize] = self.mem_read16(addr & !1) as u32;
         } else {
-            self.stall_cycles += self.mem_cycles_n(addr & !1, 2);
+            self.stall_cycles += self.write_cycles_n(addr & !1, 2);
             self.mem_write16(addr & !1, self.regs[rd as usize] as u16);
         }
     }
@@ -1402,7 +1402,7 @@ impl Gba {
             self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + 1;
             self.regs[rd as usize] = self.mem_read32_rotate(addr);
         } else {
-            self.stall_cycles += self.mem_cycles_n(addr & !3, 4);
+            self.stall_cycles += self.write_cycles_n(addr & !3, 4);
             self.mem_write32(addr & !3, self.regs[rd as usize]);
         }
     }
@@ -1466,7 +1466,7 @@ impl Gba {
             let mut seq = false;
             for i in 0..8u32 {
                 if (rlist >> i) & 1 != 0 {
-                    let cyc = if seq { self.mem_cycles_s(addr & !3, 4) } else { self.mem_cycles_n(addr & !3, 4) };
+                    let cyc = if seq { self.write_cycles_s(addr & !3, 4) } else { self.write_cycles_n(addr & !3, 4) };
                     self.stall_cycles += cyc;
                     seq = true;
                     self.mem_write32(addr & !3, self.regs[i as usize]);
@@ -1474,7 +1474,7 @@ impl Gba {
                 }
             }
             if r {
-                let cyc = if seq { self.mem_cycles_s(addr & !3, 4) } else { self.mem_cycles_n(addr & !3, 4) };
+                let cyc = if seq { self.write_cycles_s(addr & !3, 4) } else { self.write_cycles_n(addr & !3, 4) };
                 self.stall_cycles += cyc;
                 self.mem_write32(addr & !3, self.regs[14]);
             }
@@ -1504,7 +1504,7 @@ impl Gba {
             let mut seq = false;
             for i in 0..8u32 {
                 if (rlist >> i) & 1 != 0 {
-                    let cyc = if seq { self.mem_cycles_s(addr & !3, 4) } else { self.mem_cycles_n(addr & !3, 4) };
+                    let cyc = if seq { self.write_cycles_s(addr & !3, 4) } else { self.write_cycles_n(addr & !3, 4) };
                     self.stall_cycles += cyc;
                     seq = true;
                     self.mem_write32(addr & !3, self.regs[i as usize]);

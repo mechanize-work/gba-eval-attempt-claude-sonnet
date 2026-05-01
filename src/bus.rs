@@ -32,17 +32,41 @@ impl Gba {
         }
     }
 
-    // Sequential (S) access cycles
+    // Sequential (S) access cycles for DATA reads (no prefetch buffer benefit)
     pub(crate) fn mem_cycles_s(&self, addr: u32, width: u8) -> u32 {
         let wc = self.waitcnt;
-        let prefetch = (wc >> 14) & 1 != 0;
         match addr >> 24 {
             0x00 => 1,
             0x02 => if width == 4 { 6 } else { 3 },
             0x03 | 0x04 | 0x07 => 1,
             0x05 | 0x06 => if width == 4 { 2 } else { 1 },
             0x08 | 0x09 => {
-                // Prefetch buffer reduces S-cycle to 1 cycle per halfword (16-bit)
+                // Data reads from ROM use wait-state S timing (NOT prefetch)
+                let s = 1 + [2u32, 1][((wc >> 4) & 1) as usize];
+                if width == 4 { s + s } else { s }
+            }
+            0x0A | 0x0B => {
+                let s = 1 + [4u32, 1][((wc >> 7) & 1) as usize];
+                if width == 4 { s + s } else { s }
+            }
+            0x0C | 0x0D => {
+                let s = 1 + [8u32, 1][((wc >> 10) & 1) as usize];
+                if width == 4 { s + s } else { s }
+            }
+            0x0E | 0x0F => {
+                const WS_N: [u32; 4] = [4, 3, 2, 8];
+                1 + WS_N[(wc & 3) as usize]
+            }
+            _ => 1,
+        }
+    }
+
+    // Sequential (S) instruction fetch cycles (prefetch buffer applies to ROM)
+    pub(crate) fn insn_cycles_s(&self, addr: u32, width: u8) -> u32 {
+        let wc = self.waitcnt;
+        let prefetch = (wc >> 14) & 1 != 0;
+        match addr >> 24 {
+            0x08 | 0x09 => {
                 let s = if prefetch { 1 } else { 1 + [2u32, 1][((wc >> 4) & 1) as usize] };
                 if width == 4 { s + s } else { s }
             }
@@ -54,12 +78,35 @@ impl Gba {
                 let s = if prefetch { 1 } else { 1 + [8u32, 1][((wc >> 10) & 1) as usize] };
                 if width == 4 { s + s } else { s }
             }
-            0x0E | 0x0F => {
-                const WS_N: [u32; 4] = [4, 3, 2, 8];
-                1 + WS_N[(wc & 3) as usize]
-            }
-            _ => 1,
+            _ => self.mem_cycles_s(addr, width),
         }
+    }
+
+    // Non-sequential (N) instruction fetch cycles (prefetch can serve as S for ROM)
+    // When prefetch is enabled, ROM N-fetches are served from the prefetch buffer
+    // at S-cycle speed (the buffer has been filling while the CPU was executing)
+    pub(crate) fn insn_cycles_n(&self, addr: u32, width: u8) -> u32 {
+        let prefetch = (self.waitcnt >> 14) & 1 != 0;
+        if prefetch {
+            match addr >> 24 {
+                0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D => {
+                    // Prefetch buffer serves ROM instruction fetches as 1 cycle/halfword
+                    return if width == 4 { 2 } else { 1 };
+                }
+                _ => {}
+            }
+        }
+        self.mem_cycles_n(addr, width)
+    }
+
+    // Write cycles: EWRAM uses write buffer (1 cycle), others use normal N timing
+    pub(crate) fn write_cycles_n(&self, addr: u32, width: u8) -> u32 {
+        if (addr >> 24) == 0x02 { 1 } else { self.mem_cycles_n(addr, width) }
+    }
+
+    // Write cycles sequential: EWRAM uses write buffer (1 cycle), others use data S timing
+    pub(crate) fn write_cycles_s(&self, addr: u32, width: u8) -> u32 {
+        if (addr >> 24) == 0x02 { 1 } else { self.mem_cycles_s(addr, width) }
     }
 
     // Add cycles for a data access (N cycles, non-sequential)
