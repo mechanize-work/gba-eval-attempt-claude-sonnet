@@ -197,6 +197,74 @@ mod tests {
     }
 
     #[test]
+    fn test_anguna_init_trace() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        // Trace the memory fill loop at 0x08000190-0x08000196
+        let mut in_loop = false;
+        let mut loop_count = 0u32;
+        let mut last_r0 = 0u32;
+        let mut last_r1 = 0u32;
+
+        for cycle in 0..(280896u32 * 5) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            // Detect entry into the fill loop (STMIA at 0x08000190)
+            if is_thumb && (pc == 0x08000190 || pc == 0x08000192 || pc == 0x08000194) {
+                if !in_loop {
+                    in_loop = true;
+                    println!("Cycle {}: Entering fill loop R0=0x{:08X} R1=0x{:08X}",
+                        cycle, gba.regs[0], gba.regs[1]);
+                    last_r0 = gba.regs[0];
+                    last_r1 = gba.regs[1];
+                }
+                loop_count += 1;
+            } else if in_loop {
+                println!("Cycle {}: Leaving fill loop after {} iterations, R0=0x{:08X}",
+                    cycle, loop_count / 3, gba.regs[0]);
+                in_loop = false;
+                loop_count = 0;
+            }
+
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc {
+                println!("Cycle {}: DISPCNT 0x{:04X}->0x{:04X}", cycle, old_dc, gba.dispcnt);
+            }
+        }
+    }
+
+    #[test]
+    fn test_halt_trace() {
+        // Count how many times each ROM halts (VBlankIntrWait) before clearing forced blank
+        for (name, rom) in [
+            ("anguna", "/task/dev-roms/anguna.gba"),
+            ("meteorain", "/task/dev-roms/meteorain.gba"),
+        ] {
+            let mut gba = make_gba(rom);
+            let mut halt_count = 0u32;
+            let mut done = false;
+            for cycle in 0..(280896u32 * 15) {
+                let was_halted = gba.halted;
+                let old_dc = gba.dispcnt;
+                gba.tick_one_cycle();
+                if !was_halted && gba.halted {
+                    halt_count += 1;
+                }
+                if gba.dispcnt != old_dc && (old_dc & 0x80) != 0 {
+                    println!("{}: forced blank cleared at cycle {} (frame {}), halts before: {}",
+                        name, cycle, cycle/280896, halt_count);
+                    done = true;
+                    break;
+                }
+            }
+            if !done {
+                println!("{}: forced blank NOT cleared in 15 frames, halts: {}", name, halt_count);
+            }
+        }
+    }
+
+    #[test]
     fn test_waitcnt_trace() {
         for (name, rom) in [
             ("anguna", "/task/dev-roms/anguna.gba"),
