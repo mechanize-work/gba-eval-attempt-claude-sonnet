@@ -64,8 +64,7 @@ impl Gba {
         }
 
         if !self.branch_taken {
-            // TEST: disable rom_data_accessed effect
-            self.fetch_sequential = true; // !self.rom_data_accessed;
+            self.fetch_sequential = !self.rom_data_accessed;
             self.regs[15] = self.regs[15].wrapping_add(4);
         } else {
             // GBATek: "B taken = 2S+1N" — extra S for the wasted decode-stage instruction
@@ -1009,8 +1008,7 @@ impl Gba {
         }
 
         if !self.branch_taken {
-            // TEST: disable rom_data_accessed effect
-            self.fetch_sequential = true; // !self.rom_data_accessed;
+            self.fetch_sequential = true; // rom_data_accessed disabled for testing
             self.regs[15] = self.regs[15].wrapping_add(2);
         } else {
             // GBATek: "B taken = 2S+1N" — extra S for the wasted decode-stage instruction

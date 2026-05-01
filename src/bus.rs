@@ -11,30 +11,32 @@ impl Gba {
     }
 
     // Non-sequential (N) access cycles for given address and width (1=8bit, 2=16bit, 4=32bit)
+    // GBATek: table values are total cycle counts (1 base + wait states).
     pub(crate) fn mem_cycles_n(&self, addr: u32, width: u8) -> u32 {
         let wc = self.waitcnt;
-        const WS_N: [u32; 4] = [4, 3, 2, 8];
+        // GBATek WAITCNT table values are total cycle counts (not wait states).
+        const WS_N: [u32; 4] = [4, 3, 2, 8];  // WS0/WS1/WS2 First Access (N)
         match addr >> 24 {
             0x00 => 1,                                          // BIOS
             0x02 => self.ewram_cycles(width),                   // WRAM 256K (16-bit bus)
             0x03 | 0x04 | 0x07 => 1,                           // IRAM, I/O, OAM
             0x05 | 0x06 => if width == 4 { 2 } else { 1 },     // Palette, VRAM (16-bit bus)
             0x08 | 0x09 => {                                    // ROM WS0
-                let n = 1 + WS_N[((wc >> 2) & 3) as usize];
-                let s = 1 + [2u32, 1][((wc >> 4) & 1) as usize];
+                let n = WS_N[((wc >> 2) & 3) as usize];
+                let s = [2u32, 1][((wc >> 4) & 1) as usize];
                 if width == 4 { n + s } else { n }
             }
             0x0A | 0x0B => {                                    // ROM WS1
-                let n = 1 + WS_N[((wc >> 5) & 3) as usize];
-                let s = 1 + [4u32, 1][((wc >> 7) & 1) as usize];
+                let n = WS_N[((wc >> 5) & 3) as usize];
+                let s = [4u32, 1][((wc >> 7) & 1) as usize];
                 if width == 4 { n + s } else { n }
             }
             0x0C | 0x0D => {                                    // ROM WS2
-                let n = 1 + WS_N[((wc >> 8) & 3) as usize];
-                let s = 1 + [8u32, 1][((wc >> 10) & 1) as usize];
+                let n = WS_N[((wc >> 8) & 3) as usize];
+                let s = [8u32, 1][((wc >> 10) & 1) as usize];
                 if width == 4 { n + s } else { n }
             }
-            0x0E | 0x0F => 1 + WS_N[(wc & 3) as usize],       // SRAM
+            0x0E | 0x0F => WS_N[(wc & 3) as usize],            // SRAM
             _ => 1,
         }
     }
@@ -49,20 +51,20 @@ impl Gba {
             0x05 | 0x06 => if width == 4 { 2 } else { 1 },
             0x08 | 0x09 => {
                 // Data reads from ROM use wait-state S timing (NOT prefetch)
-                let s = 1 + [2u32, 1][((wc >> 4) & 1) as usize];
+                let s = [2u32, 1][((wc >> 4) & 1) as usize];
                 if width == 4 { s + s } else { s }
             }
             0x0A | 0x0B => {
-                let s = 1 + [4u32, 1][((wc >> 7) & 1) as usize];
+                let s = [4u32, 1][((wc >> 7) & 1) as usize];
                 if width == 4 { s + s } else { s }
             }
             0x0C | 0x0D => {
-                let s = 1 + [8u32, 1][((wc >> 10) & 1) as usize];
+                let s = [8u32, 1][((wc >> 10) & 1) as usize];
                 if width == 4 { s + s } else { s }
             }
             0x0E | 0x0F => {
                 const WS_N: [u32; 4] = [4, 3, 2, 8];
-                1 + WS_N[(wc & 3) as usize]
+                WS_N[(wc & 3) as usize]
             }
             _ => 1,
         }
@@ -74,15 +76,15 @@ impl Gba {
         let prefetch = (wc >> 14) & 1 != 0;
         match addr >> 24 {
             0x08 | 0x09 => {
-                let s = if prefetch { 1 } else { 1 + [2u32, 1][((wc >> 4) & 1) as usize] };
+                let s = if prefetch { 1 } else { [2u32, 1][((wc >> 4) & 1) as usize] };
                 if width == 4 { s + s } else { s }
             }
             0x0A | 0x0B => {
-                let s = if prefetch { 1 } else { 1 + [4u32, 1][((wc >> 7) & 1) as usize] };
+                let s = if prefetch { 1 } else { [4u32, 1][((wc >> 7) & 1) as usize] };
                 if width == 4 { s + s } else { s }
             }
             0x0C | 0x0D => {
-                let s = if prefetch { 1 } else { 1 + [8u32, 1][((wc >> 10) & 1) as usize] };
+                let s = if prefetch { 1 } else { [8u32, 1][((wc >> 10) & 1) as usize] };
                 if width == 4 { s + s } else { s }
             }
             _ => self.mem_cycles_s(addr, width),

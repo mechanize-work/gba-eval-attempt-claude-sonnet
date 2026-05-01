@@ -3771,6 +3771,59 @@ mod tests {
     }
 
     #[test]
+    fn test_meteorain_late_init_profile() {
+        // Profile PC regions active between VBlank 13 (cycle 3567872) and dark blue start.
+        // With rom_data_accessed disabled, dark blue is at ~3857922 (after VBlank 14).
+        // We need to understand what's happening in this ~280K-cycle window.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut region_cycles: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut prev_cycles = 0u64;
+        let mut last_pc = 0u32;
+        let mut last_pal0: u16 = 0xFFFF;
+        let profile_start = 3_567_872u64;  // VBlank 13
+        let target = 4_300_000u64;
+        let mut profiling = false;
+
+        while (gba.cycles as u64) < target {
+            if !profiling && gba.cycles as u64 >= profile_start {
+                profiling = true;
+                prev_cycles = gba.cycles;
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                last_pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            }
+
+            if profiling && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                let elapsed = gba.cycles - prev_cycles;
+                *region_cycles.entry(last_pc >> 12).or_insert(0) += elapsed;
+                last_pc = pc;
+                prev_cycles = gba.cycles;
+            }
+
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                last_pal0 = pal0;
+                if pal0 == 0x0800 {
+                    println!("Dark blue at cycle={}", gba.cycles);
+                    break;
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+
+        let total: u64 = region_cycles.values().sum();
+        let mut sorted: Vec<(u32, u64)> = region_cycles.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("PC profile from VBlank13 to dark blue ({} cycles total):", total);
+        for (region, cycles) in sorted.iter().take(20) {
+            println!("  PC=0x{:07X}xxx: {} cycles ({:.1}%)",
+                region, cycles, 100.0 * *cycles as f64 / total as f64);
+        }
+    }
+
+    #[test]
     fn test_meteorain_waitcnt_trace() {
         // Trace when the game writes WAITCNT (0x04000204) during init.
         // Also trace SWI calls and DMA activity.
