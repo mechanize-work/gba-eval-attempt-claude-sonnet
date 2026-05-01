@@ -1635,6 +1635,104 @@ mod tests {
     }
 
     #[test]
+    fn test_meteorain_waitcnt_timing() {
+        // Check WAITCNT value when the ROM search loop runs
+        // The loop reads from ROM, so timing depends on WAITCNT
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        // Run to just before dark blue starts
+        let target = 2_400_000u64;
+        while (gba.cycles as u64) < target {
+            gba.tick_one_cycle();
+        }
+
+        // Report WAITCNT and sample cycles per loop iteration
+        println!("At cycle {}: WAITCNT={:04X}", gba.cycles, gba.waitcnt);
+
+        // Count cycles for 1000 iterations of the outer loop at 0x08016FD2
+        let mut loop_iters = 0u32;
+        let mut loop_start_cycle = 0u64;
+        let mut last_loop_cycle = 0u64;
+
+        let end_cycle = target + 1_000_000;
+        while (gba.cycles as u64) < end_cycle {
+            if !gba.halted && gba.cpu_cycles_remaining == 0 {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                if is_thumb {
+                    let pc = gba.regs[15].wrapping_sub(4);
+                    if pc == 0x08016FD2 {
+                        if loop_iters == 0 {
+                            loop_start_cycle = gba.cycles;
+                        }
+                        loop_iters += 1;
+                        if loop_iters <= 5 || loop_iters % 1000 == 0 {
+                            let delta = if loop_iters > 1 { gba.cycles - last_loop_cycle } else { 0 };
+                            println!("iter {}: cycle={} delta={} WAITCNT={:04X}",
+                                loop_iters, gba.cycles, delta, gba.waitcnt);
+                        }
+                        last_loop_cycle = gba.cycles;
+                        if loop_iters >= 5000 { break; }
+                    }
+                }
+            }
+            gba.tick_one_cycle();
+        }
+        if loop_iters >= 2 {
+            let total = last_loop_cycle - loop_start_cycle;
+            println!("Total {} iterations in {} cycles = {:.1} cycles/iter",
+                loop_iters, total, total as f64 / loop_iters as f64);
+        }
+    }
+
+    #[test]
+    fn test_meteorain_dark_blue_trace() {
+        // The game shows dark blue (pal0=0x0800) from cycle 2448486 to 9647099
+        // Oracle shows it for ~2.5x longer. Find the loop that controls this duration.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        // Run to start of dark blue
+        let dark_start = 2_448_000u64;
+        while (gba.cycles as u64) < dark_start {
+            gba.tick_one_cycle();
+        }
+
+        // Sample PC every 50K instructions during dark blue period
+        let dark_end = 9_700_000u64;
+        let mut instr_count = 0u64;
+        let mut last_sample = 0u64;
+        let mut pc_histogram: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+
+        while (gba.cycles as u64) < dark_end {
+            if !gba.halted && gba.cpu_cycles_remaining == 0 {
+                instr_count += 1;
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                *pc_histogram.entry(pc).or_insert(0) += 1;
+
+                if instr_count - last_sample >= 200_000 {
+                    last_sample = instr_count;
+                    // Show top 5 PCs
+                    let mut top: Vec<_> = pc_histogram.iter().collect();
+                    top.sort_by(|a, b| b.1.cmp(a.1));
+                    println!("At instr {}: cycle={}", instr_count, gba.cycles);
+                    for (pc, cnt) in top.iter().take(5) {
+                        println!("  PC={:08X}: {} times ({:.1}%)", pc, *cnt,
+                            **cnt as f64 / instr_count as f64 * 100.0);
+                    }
+                }
+            }
+            gba.tick_one_cycle();
+        }
+        let mut top: Vec<_> = pc_histogram.into_iter().collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("Final histogram (top 10):");
+        for (pc, cnt) in top.iter().take(10) {
+            println!("  PC={:08X}: {} times ({:.1}%)", pc, cnt,
+                *cnt as f64 / instr_count as f64 * 100.0);
+        }
+    }
+
+    #[test]
     fn test_meteorain_palette_loop() {
         // Trace what loop controls the dark-blue-screen duration
         // Oracle: dark blue frames 13-76 (64 frames), we: ~2-34 (32 frames)
