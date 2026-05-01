@@ -1877,6 +1877,67 @@ mod tests {
     }
 
     #[test]
+    fn test_meteorain_loop_counter() {
+        // Trace the loop counter at [SP,#4] during the dark blue phase.
+        // The loop at 0x08016FD2 checks: LDR R3,[SP,#4]; CMP R3,R5(=0); BLE exit
+        // So [SP,#4] starts positive and decrements to 0 (driven by timer IRQ).
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut last_pal0: u16 = 0xFFFF;
+        let mut dark_blue_active = false;
+        let mut iter_count = 0u64;
+        let mut prev_counter: i32 = i32::MAX;
+        let mut first_counter: i32 = 0;
+        let mut sp_addr: u32 = 0;
+        let mut counter_changes = 0u32;
+
+        for _ in 0..(30_000_000u64 * 4) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                if pal0 == 0x0800 && !dark_blue_active {
+                    dark_blue_active = true;
+                } else if pal0 != 0x0800 && dark_blue_active {
+                    dark_blue_active = false;
+                    println!("Dark blue ended: {} iterations, {} counter changes",
+                        iter_count, counter_changes);
+                    break;
+                }
+                last_pal0 = pal0;
+            }
+
+            if dark_blue_active && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                if is_thumb && gba.regs[15].wrapping_sub(4) == 0x08016FD2 {
+                    sp_addr = gba.regs[13];
+                    let sp4 = sp_addr.wrapping_add(4);
+                    let counter = (gba.mem_read16(sp4) as u16 as i32) |
+                        ((gba.mem_read16(sp4.wrapping_add(2)) as u16 as i32) << 16);
+                    if iter_count == 0 {
+                        first_counter = counter;
+                        prev_counter = counter;
+                        println!("Initial: SP=0x{:08X} [SP+4]=0x{:08X} (counter={}), R5={}",
+                            sp_addr, counter as u32, counter, gba.regs[5] as i32);
+                    } else if counter != prev_counter {
+                        if counter_changes < 10 {
+                            println!("  iter {}: counter changed {} -> {} (delta={})",
+                                iter_count, prev_counter, counter, counter - prev_counter);
+                        }
+                        counter_changes += 1;
+                        prev_counter = counter;
+                    }
+                    iter_count += 1;
+                }
+            }
+            gba.tick_one_cycle();
+        }
+        println!("First counter={}, final counter={}, total changes={}, iterations={}",
+            first_counter, prev_counter, counter_changes, iter_count);
+        // How many IRQs fired: each IRQ decrements counter by some amount
+        println!("Expected timer IRQs: ~{} (57 frames * 280896/4096)",
+            57u64 * 280896 / 4096);
+    }
+
+    #[test]
     fn test_meteorain_ldr_addr() {
         // Trace what address LDR at 08016FE4 is loading from
         let mut gba = make_gba("/task/dev-roms/meteorain.gba");
