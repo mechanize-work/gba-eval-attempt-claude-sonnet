@@ -77,8 +77,9 @@ impl Gba {
                     self.arm_halfword(instr); return;
                 }
 
-                // PSR transfer: bits[24:23]=10, bit[20]=0
-                if (hi & 0xFB) == 0x10 && (lo & 1) == 0 {
+                // PSR transfer: bit[24]=1, bit[23]=0, bit[20]=0 (S=0)
+                // Catches MRS (0x10/0x14) and MSR register (0x12/0x16)
+                if (hi & 0x19) == 0x10 {
                     self.arm_psr(instr); return;
                 }
 
@@ -155,10 +156,12 @@ impl Gba {
     #[inline]
     fn set_reg(&mut self, n: u32, val: u32) {
         if n == 15 {
-            // Writing to PC: flush pipeline and branch
-            // In ARM mode: PC set to val (word-aligned) + 8 for pipeline
-            // But for data processing results, we just branch to val
-            self.regs[15] = (val & !3).wrapping_add(8);
+            // Writing to PC: flush pipeline with correct mode offset
+            if (self.cpsr & CPSR_T) != 0 {
+                self.regs[15] = (val & !1).wrapping_add(4);
+            } else {
+                self.regs[15] = (val & !3).wrapping_add(8);
+            }
         } else {
             self.regs[n as usize] = val;
         }

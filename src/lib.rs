@@ -4,6 +4,8 @@ mod ppu;
 mod apu;
 mod dma;
 mod timer;
+#[cfg(test)]
+mod tests;
 
 // ============================================================
 // Main GBA state struct
