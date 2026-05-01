@@ -2020,6 +2020,56 @@ mod tests {
     }
 
     #[test]
+    fn test_meteorain_r4_experiment() {
+        // Test what happens if R4 is larger at loop start (oracle might have different R4).
+        // R4 controls inner comparison length. Larger R4 = stricter match = different termination.
+        for &force_r4 in &[12u32, 16, 20, 24, 28, 32] {
+            let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+            let mut last_pal0: u16 = 0xFFFF;
+            let mut dark_blue_active = false;
+            let mut iter_count = 0u64;
+            let mut loop_entry_cycle = 0u64;
+            let mut loop_exit_r5 = 0u32;
+            let mut r4_forced = false;
+
+            for _ in 0..(30_000_000u64 * 5) {
+                let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+                if pal0 != last_pal0 {
+                    if pal0 == 0x0800 && !dark_blue_active {
+                        dark_blue_active = true;
+                    } else if pal0 != 0x0800 && dark_blue_active {
+                        dark_blue_active = false;
+                        let loop_cycles = gba.cycles - loop_entry_cycle;
+                        println!("R4={}: {} iters, {:.1} cyc/iter, frame={} R5_exit=0x{:X}",
+                            force_r4, iter_count, loop_cycles as f64 / iter_count as f64,
+                            gba.cycles / 280896, loop_exit_r5);
+                        break;
+                    }
+                    last_pal0 = pal0;
+                }
+                if dark_blue_active && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                    let is_thumb = (gba.cpsr & 0x20) != 0;
+                    if is_thumb {
+                        let pc = gba.regs[15].wrapping_sub(4);
+                        if pc == 0x08016FD2 {
+                            if iter_count == 0 {
+                                loop_entry_cycle = gba.cycles;
+                                if !r4_forced {
+                                    gba.regs[4] = force_r4;
+                                    r4_forced = true;
+                                }
+                            }
+                            iter_count += 1;
+                            loop_exit_r5 = gba.regs[5];
+                        }
+                    }
+                }
+                gba.tick_one_cycle();
+            }
+        }
+    }
+
+    #[test]
     fn test_meteorain_waitcnt_experiment() {
         // Test: what happens to frame count with WAITCNT=0x4317 (real BIOS setting)?
         // Also: where exactly does the search terminate in ROM?
