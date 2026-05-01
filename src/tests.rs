@@ -1853,6 +1853,21 @@ mod tests {
                     if iter_count == 0 {
                         loop_entry_cycle = gba.cycles;
                         first_r5 = gba.regs[5];
+                        println!("First R0={:08X} R1={:08X} R2={:08X} R3={:08X}",
+                            gba.regs[0], gba.regs[1], gba.regs[2], gba.regs[3]);
+                        println!("First R4={:08X} R5={:08X} R6={:08X} R7={:08X}",
+                            gba.regs[4], gba.regs[5], gba.regs[6], gba.regs[7]);
+                        println!("WAITCNT=0x{:04X} MEMCNT=0x{:08X}",
+                            gba.waitcnt, gba.memcnt);
+                        // Also check ROM bytes at 0x08017028 (search key) and 0x0801702C (comparison table)
+                        let key_off = 0x08017028usize - 0x08000000;
+                        let key0 = (gba.rom[key_off] as u32) | ((gba.rom[key_off+1] as u32)<<8)
+                            | ((gba.rom[key_off+2] as u32)<<16) | ((gba.rom[key_off+3] as u32)<<24);
+                        let cmp_off = 0x0801702Cusize - 0x08000000;
+                        println!("ROM search key at 0x08017028: 0x{:08X}", key0);
+                        println!("ROM cmp table at 0x0801702C: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+                            gba.rom[cmp_off], gba.rom[cmp_off+1], gba.rom[cmp_off+2], gba.rom[cmp_off+3],
+                            gba.rom[cmp_off+4], gba.rom[cmp_off+5], gba.rom[cmp_off+6], gba.rom[cmp_off+7]);
                         println!("First R5={:08X} R7={:08X} WAITCNT=0x{:04X} MEMCNT=0x{:08X}",
                             gba.regs[5], gba.regs[7], gba.waitcnt, gba.memcnt);
                         println!("IME=0x{:X} IE=0x{:04X} IF=0x{:04X}",
@@ -1873,6 +1888,189 @@ mod tests {
             }
 
             gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_meteorain_isr_disasm() {
+        // Dump game ISR from IRAM at dark blue start, and trace first few IRQ instructions
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut found = false;
+        for _ in 0..(30_000_000u64 * 2) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !found {
+                found = true;
+                // Dump IRAM from 0x03000FD8 (game ISR)
+                let isr_addr = 0x0300_0FD8u32;
+                let off = (isr_addr & 0x7FFF) as usize;
+                println!("Game ISR at 0x03000FD8 (IRAM offset 0x{:04X}):", off);
+                for i in 0..20usize {
+                    let addr = isr_addr + i as u32 * 4;
+                    let o = off + i * 4;
+                    let word = (gba.iram[o] as u32) | ((gba.iram[o+1] as u32) << 8)
+                        | ((gba.iram[o+2] as u32) << 16) | ((gba.iram[o+3] as u32) << 24);
+                    println!("  {:08X}: {:08X}", addr, word);
+                }
+                // Also print ISR vector
+                let isr_ptr = (gba.iram[0x7FFC] as u32) | ((gba.iram[0x7FFD] as u32) << 8)
+                    | ((gba.iram[0x7FFE] as u32) << 16) | ((gba.iram[0x7FFF] as u32) << 24);
+                println!("ISR pointer at 0x03007FFC = 0x{:08X}", isr_ptr);
+                break;
+            }
+            gba.tick_one_cycle();
+        }
+
+        // Now trace the first complete IRQ from entry to exit, counting ARM cycles by PC
+        let mut gba2 = make_gba("/task/dev-roms/meteorain.gba");
+        let mut found2 = false;
+        let mut in_irq = false;
+        let mut irq_start_cycle = 0u64;
+        let mut arm_trace: Vec<(u32, u32)> = Vec::new(); // (pc, stall)
+
+        for _ in 0..(30_000_000u64 * 2) {
+            let pal0 = (gba2.palette[0] as u16) | ((gba2.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !found2 {
+                found2 = true;
+            }
+            if found2 && gba2.cpu_cycles_remaining == 0 && !gba2.halted {
+                let mode = gba2.cpsr & 0x1F;
+                let is_thumb = (gba2.cpsr & 0x20) != 0;
+                if !in_irq && mode == 0x12 {
+                    in_irq = true;
+                    irq_start_cycle = gba2.cycles;
+                    arm_trace.clear();
+                }
+                if in_irq {
+                    if !is_thumb {
+                        let pc = gba2.regs[15].wrapping_sub(8);
+                        gba2.tick_one_cycle();
+                        arm_trace.push((pc, gba2.stall_cycles));
+                    } else {
+                        gba2.tick_one_cycle();
+                    }
+                    if mode != 0x12 && arm_trace.len() > 0 {
+                        // IRQ returned
+                        in_irq = false;
+                        let irq_cycles = gba2.cycles - irq_start_cycle;
+                        println!("First IRQ: {} cycles, {} ARM instructions", irq_cycles, arm_trace.len());
+                        for (pc, sc) in &arm_trace {
+                            println!("  ARM PC=0x{:08X} stall={}", pc, sc);
+                        }
+                        break;
+                    }
+                    continue;
+                }
+            }
+            gba2.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_meteorain_isr_location() {
+        // Find the game's ISR pointer at 0x03007FFC and trace one IRQ
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut last_pal0: u16 = 0xFFFF;
+        let mut dark_blue_active = false;
+        let mut irq_count = 0u32;
+        let mut in_irq = false;
+        let mut isr_ptr: u32 = 0;
+
+        for _ in 0..(30_000_000u64 * 2) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                if pal0 == 0x0800 && !dark_blue_active {
+                    dark_blue_active = true;
+                    // Read ISR pointer from IRAM
+                    isr_ptr = (gba.iram[0x7FF8] as u32) | ((gba.iram[0x7FF9] as u32) << 8)
+                        | ((gba.iram[0x7FFA] as u32) << 16) | ((gba.iram[0x7FFB] as u32) << 24);
+                    let isr_ptr2 = (gba.iram[0x7FFC] as u32) | ((gba.iram[0x7FFD] as u32) << 8)
+                        | ((gba.iram[0x7FFE] as u32) << 16) | ((gba.iram[0x7FFF] as u32) << 24);
+                    println!("Dark blue START: ISR@0x03007FF8=0x{:08X}, ISR@0x03007FFC=0x{:08X}",
+                        isr_ptr, isr_ptr2);
+                    println!("WAITCNT=0x{:04X}", gba.waitcnt);
+                } else if pal0 != 0x0800 && dark_blue_active {
+                    dark_blue_active = false;
+                    println!("Dark blue END after {} IRQs", irq_count);
+                    break;
+                }
+                last_pal0 = pal0;
+            }
+
+            if dark_blue_active {
+                let was_irq = (gba.cpsr & 0x80) == 0 && (gba.cpsr & 0x1F) == 0x12;
+                // Detect IRQ entry: CPSR mode switches to IRQ (0x12)
+                let mode = gba.cpsr & 0x1F;
+                if mode == 0x12 && !in_irq {
+                    in_irq = true;
+                    irq_count += 1;
+                    if irq_count <= 3 {
+                        let pc = gba.regs[15].wrapping_sub(8);
+                        println!("IRQ #{}: PC=0x{:08X} mode=0x{:02X}",
+                            irq_count, pc, mode);
+                    }
+                } else if mode != 0x12 && in_irq {
+                    in_irq = false;
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_meteorain_waitcnt_experiment() {
+        // Test: what happens to frame count with WAITCNT=0x4317 (real BIOS setting)?
+        // Also: where exactly does the search terminate in ROM?
+        for &force_waitcnt in &[0x0000u16, 0x4317u16] {
+            let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+            let mut last_pal0: u16 = 0xFFFF;
+            let mut dark_blue_active = false;
+            let mut iter_count = 0u64;
+            let mut loop_entry_cycle = 0u64;
+            let mut loop_exit_r5 = 0u32;
+
+            for _ in 0..(30_000_000u64 * 3) {
+                let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+                if pal0 != last_pal0 {
+                    if pal0 == 0x0800 && !dark_blue_active {
+                        dark_blue_active = true;
+                        // Force WAITCNT at dark blue start
+                        if force_waitcnt != 0x0000 {
+                            gba.waitcnt = force_waitcnt;
+                        }
+                    } else if pal0 != 0x0800 && dark_blue_active {
+                        dark_blue_active = false;
+                        let loop_cycles = gba.cycles - loop_entry_cycle;
+                        println!("WAITCNT=0x{:04X}: {} iters, {} cycles, {:.1} cyc/iter, frame={} R5_final=0x{:X}",
+                            force_waitcnt, iter_count, loop_cycles,
+                            loop_cycles as f64 / iter_count as f64,
+                            gba.cycles / 280896, loop_exit_r5);
+                        break;
+                    }
+                    last_pal0 = pal0;
+                }
+
+                if dark_blue_active && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                    let is_thumb = (gba.cpsr & 0x20) != 0;
+                    if is_thumb {
+                        let pc = gba.regs[15].wrapping_sub(4);
+                        if pc == 0x08016FD2 {
+                            if iter_count == 0 { loop_entry_cycle = gba.cycles; }
+                            iter_count += 1;
+                            loop_exit_r5 = gba.regs[5];
+                        }
+                        // Check if we're at the exit point (17014 = found match)
+                        if pc == 0x08017014 || pc == 0x08017006 {
+                            println!("WAITCNT=0x{:04X}: Loop exit at PC=0x{:08X} R5=0x{:08X} ({} iters)",
+                                force_waitcnt, pc, gba.regs[5], iter_count);
+                        }
+                    }
+                }
+                gba.tick_one_cycle();
+            }
         }
     }
 
