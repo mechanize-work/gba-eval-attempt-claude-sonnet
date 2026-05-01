@@ -2741,4 +2741,153 @@ mod tests {
         println!("Grand total from PC breakdown: {} cycles ({:.1} avg/iter)",
             grand_total_cycles, grand_total_cycles as f64 / iter_count as f64);
     }
+
+    #[test]
+    fn test_meteorain_ring_buf_init() {
+        // Investigate: what writes to IRAM[0x030012CC/D0] and IRAM[0x0300129C..0x030012BC]?
+        // The ring buffer at struct+28=0x0300129C should get entries written to it.
+        // Trace all writes to the struct area [0x03001280..0x030012E0].
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut dark_blue_found = false;
+        let mut change_count = 0u32;
+        let mut prev_struct: Vec<u8> = vec![0u8; 0x80];
+
+        // Initialize prev_struct
+        for i in 0..0x80usize {
+            prev_struct[i] = gba.iram[0x1280 + i];
+        }
+
+        for _ in 0..(30_000_000u64 * 4) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !dark_blue_found {
+                dark_blue_found = true;
+                println!("=== Dark blue START at cycle {} ===", gba.cycles);
+                // Dump full struct at dark blue start
+                println!("IRAM[0x03001280..0x030012E0]:");
+                for off in (0..0x60usize).step_by(4) {
+                    let addr = 0x03001280u32 + off as u32;
+                    let v = read_iram_word(&gba, addr);
+                    if v != 0 {
+                        println!("  [{:08X}] = {:08X} (struct+{})", addr, v, off);
+                    }
+                }
+            }
+
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                // Check for any change in the struct area
+                for i in 0..0x80usize {
+                    let cur = gba.iram[0x1280 + i];
+                    if cur != prev_struct[i] {
+                        let addr = 0x03001280u32 + i as u32;
+                        let is_thumb = (gba.cpsr & 0x20) != 0;
+                        let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                        let phase = if dark_blue_found { "DARK_BLUE" } else { "INIT" };
+                        println!("[{}] cycle={} PC={:08X}: IRAM[{:08X}] {:02X}->{:02X}",
+                            phase, gba.cycles, pc, addr, prev_struct[i], cur);
+                        prev_struct[i] = cur;
+                        change_count += 1;
+                        if change_count > 200 {
+                            println!("Too many changes, stopping.");
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if dark_blue_found && pal0 != 0x0800 {
+                println!("Dark blue ENDED at cycle {}", gba.cycles);
+                break;
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_meteorain_vblank_isr_trace() {
+        // Trace the VBlank ISR during dark blue to see if it calls the audio fill function
+        // The ring buffer producer should be called from somewhere: VBlank ISR or Timer1 ISR?
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut dark_blue_found = false;
+        let mut in_vblank_irq = false;
+        let mut vblank_irq_count = 0u32;
+        let mut vblank_trace: Vec<(u32, u32, u32)> = Vec::new();
+
+        for _ in 0..(30_000_000u64 * 3) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !dark_blue_found {
+                dark_blue_found = true;
+            }
+            if dark_blue_found && pal0 != 0x0800 { break; }
+
+            if dark_blue_found && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let mode = (gba.cpsr & 0x1F) as u8;
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                // Detect IRQ entry
+                if !in_vblank_irq && mode == 0x12 && pc < 0x4000 {
+                    // Check if this is a VBlank IRQ (IF bit 0 set)
+                    // We'll check by looking at where it goes
+                    in_vblank_irq = true;
+                }
+
+                if in_vblank_irq {
+                    let enc = if is_thumb { gba.mem_read16(pc) as u32 } else { gba.mem_read32(pc) };
+
+                    // Track calls to the audio functions
+                    if pc == 0x0801A5B0 || pc == 0x0801A5B1 || pc == 0x0801A66A {
+                        println!("VBlank IRQ {}: called audio fn at 0x{:08X} (cycle {})",
+                            vblank_irq_count, pc, gba.cycles);
+                    }
+
+                    // Also monitor writes to ring buffer area
+                    // Detect return to main loop (Thumb code in ROM search range)
+                    if is_thumb && pc >= 0x08016FD0 && pc <= 0x08017020 {
+                        if vblank_irq_count < 3 {
+                            let total: u32 = vblank_trace.iter().map(|(_, _, c)| c).sum();
+                            println!("VBlank IRQ {} done: {} insns, {} cycles",
+                                vblank_irq_count, vblank_trace.len(), total);
+                            // Show any ROM calls (0x08... addresses)
+                            let rom_calls: Vec<_> = vblank_trace.iter()
+                                .filter(|(p, _, _)| *p >= 0x08000000)
+                                .collect();
+                            println!("  ROM instructions: {} total", rom_calls.len());
+                            // Show unique ROM functions called
+                            let mut fn_starts: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                            for (p, _, _) in &vblank_trace {
+                                if *p >= 0x08000000 { fn_starts.insert(*p & !0xF); }
+                            }
+                            let mut fns: Vec<_> = fn_starts.into_iter().collect();
+                            fns.sort();
+                            if fns.len() <= 30 {
+                                println!("  ROM regions visited: {:?}",
+                                    fns.iter().map(|a| format!("{:08X}", a)).collect::<Vec<_>>());
+                            }
+                        }
+                        vblank_trace.clear();
+                        in_vblank_irq = false;
+                        vblank_irq_count += 1;
+                        if vblank_irq_count >= 5 { break; }
+                    } else {
+                        if vblank_trace.len() < 2000 {
+                            let stall = {
+                                gba.tick_one_cycle();
+                                let s = gba.stall_cycles;
+                                while gba.cpu_cycles_remaining > 0 { gba.tick_one_cycle(); }
+                                s
+                            };
+                            vblank_trace.push((pc, enc, stall as u32));
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+        println!("Total VBlank ISRs traced: {}", vblank_irq_count);
+    }
 }
