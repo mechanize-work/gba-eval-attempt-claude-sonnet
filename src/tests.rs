@@ -835,6 +835,127 @@ mod tests {
     }
 
     #[test]
+    fn test_anguna_dispcnt_pc() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let mut last_pc = 0u32;
+        for cycle in 0..(280896u32 * 5) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            if pc == 0x080236B4 && last_pc != 0x080236B4 {
+                println!("Cycle {cycle}: anguna hits 0x080236B4 (meteorain's VRAM fill), DISPCNT={:04X}", gba.dispcnt);
+            }
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc {
+                let is_forced_blank = (old_dc & 0x80) != 0 && (gba.dispcnt & 0x80) == 0;
+                println!("Cycle {cycle}: DISPCNT {:04X} -> {:04X} (PC was {:08X}) forced_blank_cleared={}",
+                    old_dc, gba.dispcnt, pc, is_forced_blank);
+                if is_forced_blank { break; }
+            }
+            last_pc = pc;
+        }
+    }
+
+    #[test]
+    fn test_anguna_init_timing() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let mut fill_loop_iters = 0u64;
+        let mut copy_loop_iters = 0u64;
+        let mut last_pc = 0u32;
+        let mut forced_blank_cleared = false;
+
+        for cycle in 0..(280896u32 * 5) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            // Fill loop at 0x08000190
+            if pc == 0x08000190 && last_pc != 0x08000190 {
+                if fill_loop_iters == 0 {
+                    println!("Fill loop start at cycle {}: R0={:08X} R1={:08X} R2={:08X} (DISPCNT={:04X})",
+                        cycle, gba.regs[0], gba.regs[1], gba.regs[2], gba.dispcnt);
+                }
+                fill_loop_iters += 1;
+            }
+
+            // Copy loop at 0x080001A4
+            if pc == 0x080001A4 && last_pc != 0x080001A4 {
+                if copy_loop_iters == 0 {
+                    println!("Copy loop start at cycle {}: R1={:08X} R2={:08X} R3={:08X} (DISPCNT={:04X})",
+                        cycle, gba.regs[1], gba.regs[2], gba.regs[3], gba.dispcnt);
+                }
+                copy_loop_iters += 1;
+            }
+
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc {
+                println!("Cycle {}: DISPCNT {:04X} -> {:04X} (frame {}, fill_iters={}, copy_iters={})",
+                    cycle, old_dc, gba.dispcnt, cycle/280896, fill_loop_iters, copy_loop_iters);
+                if (old_dc & 0x80) != 0 {
+                    forced_blank_cleared = true;
+                    break;
+                }
+            }
+            last_pc = pc;
+        }
+        println!("Fill loop total: {fill_loop_iters}, copy loop total: {copy_loop_iters}");
+    }
+
+    #[test]
+    fn test_meteorain_comprehensive_trace() {
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut total_instructions = 0u64;
+        let mut loop_pc_counts: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut dispcnt_writes = 0u32;
+
+        for cycle in 0..(280896u32 * 15) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            // Count instruction visits (approximation: count by cycle change would miss stalls)
+            // Instead, let's use a different approach: count BNE back-branches as loop iterations
+            if is_thumb {
+                let instr = gba.mem_read16(pc);
+                // BNE: 0b11010001 prefix
+                if (instr >> 8) == 0b11010001 {
+                    let off = (instr & 0xFF) as i8 as i32;
+                    if off < 0 { // backward branch
+                        *loop_pc_counts.entry(pc).or_insert(0) += 1;
+                    }
+                }
+                // B backward: 0b11100 prefix (format 18)
+                if (instr >> 11) == 0b11100 {
+                    let off = (instr & 0x7FF) as i32;
+                    let off = if off & 0x400 != 0 { off - 0x800 } else { off };
+                    if off < 0 {
+                        *loop_pc_counts.entry(pc | 0x80000000).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc {
+                println!("Cycle {cycle} (frame {}): DISPCNT {:04X} -> {:04X}",
+                    cycle/280896, old_dc, gba.dispcnt);
+                if (old_dc & 0x80) != 0 {
+                    println!("Forced blank CLEARED at cycle {cycle}!");
+                    break;
+                }
+            }
+        }
+
+        println!("Top backward branches (loop heads):");
+        let mut sorted: Vec<(u32, u64)> = loop_pc_counts.into_iter().collect();
+        sorted.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+        for (pc, count) in sorted.iter().take(20) {
+            let real_pc = *pc & !0x80000000;
+            let btype = if *pc & 0x80000000 != 0 { "B" } else { "BNE" };
+            println!("  PC=0x{real_pc:08X} ({btype}): {count} iterations");
+        }
+    }
+
+    #[test]
     fn test_meteorain_pre_clear_trace() {
         let mut gba = make_gba("/task/dev-roms/meteorain.gba");
         let mut last_dispcnt = gba.dispcnt;
