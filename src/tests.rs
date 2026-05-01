@@ -4026,4 +4026,73 @@ mod tests {
         }
         assert!(found_swi05, "SWI05 not found");
     }
+
+    #[test]
+    fn test_anguna_waitcnt_trace() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let mut last_waitcnt = gba.waitcnt;
+        let mut last_memcnt = gba.memcnt;
+        let mut in_fill = false;
+        let mut fill_start_cycle = 0u64;
+
+        for _ in 0..(280896u32 * 6) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            if pc == 0x08000190 && !in_fill {
+                in_fill = true;
+                fill_start_cycle = gba.cycles as u64;
+                println!("Fill loop start at cycle {}: WAITCNT={:04X} MEMCNT={:08X} R0={:08X} R1={:08X}",
+                    gba.cycles, gba.waitcnt, gba.memcnt, gba.regs[0], gba.regs[1]);
+            }
+
+            gba.tick_one_cycle();
+
+            if gba.waitcnt != last_waitcnt {
+                println!("WAITCNT changed at cycle {} (PC {:08X}): {:04X} -> {:04X}",
+                    gba.cycles, pc, last_waitcnt, gba.waitcnt);
+                last_waitcnt = gba.waitcnt;
+            }
+            if gba.memcnt != last_memcnt {
+                println!("MEMCNT changed at cycle {} (PC {:08X}): {:08X} -> {:08X}",
+                    gba.cycles, pc, last_memcnt, gba.memcnt);
+                last_memcnt = gba.memcnt;
+            }
+        }
+    }
+
+    #[test]
+    fn test_anguna_ewram_speed() {
+        // Profile how fast the fill loop actually runs with current timing
+        // and compare with expected oracle timing
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let mut fill_start = 0u64;
+        let mut fill_end = 0u64;
+        let mut in_fill = false;
+        let mut iter_count = 0u64;
+
+        for _ in 0..(280896u32 * 6) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            if pc == 0x08000190 {
+                if !in_fill {
+                    in_fill = true;
+                    fill_start = gba.cycles as u64;
+                }
+                iter_count += 1;
+            } else if in_fill && pc != 0x08000190 {
+                fill_end = gba.cycles as u64;
+                in_fill = false;
+                println!("Fill loop: {} iterations, {} cycles, {:.1} cycles/iter",
+                    iter_count, fill_end - fill_start,
+                    (fill_end - fill_start) as f64 / iter_count as f64);
+                println!("  Oracle needs ~280000 cycles for 1 frame");
+                println!("  Oracle cycles/iter would be: {:.1}", 280000.0f64 / iter_count as f64);
+                break;
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
 }
