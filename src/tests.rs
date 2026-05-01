@@ -730,25 +730,50 @@ mod tests {
     fn test_meteorain_loop_trace() {
         let mut gba = make_gba("/task/dev-roms/meteorain.gba");
 
-        // Sample PC values during startup (first 10 frames)
-        let mut pc_counts: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut fill_loop_iters = 0u64;
+        let mut copy_loop_iters = 0u64;
+        let mut vram_fill_iters = 0u64;
+        let mut last_pc = 0u32;
+        let mut saw_vram_loop = false;
 
         for cycle in 0..(280896u32 * 10) {
             let is_thumb = (gba.cpsr & 0x20) != 0;
             let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
 
-            if cycle % 100 == 0 {
-                *pc_counts.entry(pc).or_insert(0) += 1;
+            // Fill loop at 0x08000190 (STMIA to EWRAM)
+            if pc == 0x08000190 && last_pc != 0x08000190 {
+                if fill_loop_iters == 0 {
+                    println!("Fill loop start at cycle {}: R0={:08X} R1={:08X} R2={:08X}",
+                        cycle, gba.regs[0], gba.regs[1], gba.regs[2]);
+                }
+                fill_loop_iters += 1;
             }
 
+            // Copy loop at 0x080001A4 (LDMIA from ROM → STMIA to IRAM)
+            if pc == 0x080001A4 && last_pc != 0x080001A4 {
+                if copy_loop_iters == 0 {
+                    println!("Copy loop start at cycle {}: R1={:08X} R2={:08X} R3={:08X}",
+                        cycle, gba.regs[1], gba.regs[2], gba.regs[3]);
+                }
+                copy_loop_iters += 1;
+            }
+
+            // VRAM fill loop at 0x080236B4
+            if pc == 0x080236B4 && last_pc != 0x080236B4 {
+                if !saw_vram_loop {
+                    println!("VRAM fill loop start at cycle {}: R2={:08X} R5={:08X} R6={:08X}",
+                        cycle, gba.regs[2], gba.regs[5], gba.regs[6]);
+                    saw_vram_loop = true;
+                }
+                vram_fill_iters += 1;
+            }
+
+            last_pc = pc;
             gba.tick_one_cycle();
         }
 
-        let mut entries: Vec<(u32, u64)> = pc_counts.into_iter().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
-        println!("Top PCs during meteorain startup:");
-        for (pc, count) in entries.iter().take(15) {
-            println!("  PC=0x{:08X}: samples={}", pc, count);
-        }
+        println!("Fill loop total entry: {}", fill_loop_iters);
+        println!("Copy loop total entry: {}", copy_loop_iters);
+        println!("VRAM fill loop total entry: {}", vram_fill_iters);
     }
 }
