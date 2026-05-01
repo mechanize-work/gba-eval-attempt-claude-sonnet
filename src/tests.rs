@@ -3769,4 +3769,132 @@ mod tests {
         }
         println!("dark_blue_found={}, total cycles={}", dark_blue_found, gba.cycles);
     }
+
+    #[test]
+    fn test_meteorain_waitcnt_trace() {
+        // Trace when the game writes WAITCNT (0x04000204) during init.
+        // Also trace SWI calls and DMA activity.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let target = 4_300_000u64;
+        let mut last_waitcnt = gba.waitcnt;
+        let mut vblank_count = 0u32;
+        let mut last_scanline = 0u32;
+        let mut last_pal0: u16 = 0xFFFF;
+
+        while (gba.cycles as u64) < target {
+            if gba.scanline == 160 && last_scanline == 159 {
+                vblank_count += 1;
+                println!("VBlank {}: cycle={}", vblank_count, gba.cycles);
+            }
+            last_scanline = gba.scanline;
+
+            if gba.waitcnt != last_waitcnt {
+                println!("WAITCNT: {:04X}->{:04X} at cycle={} (vblank_count={})",
+                    last_waitcnt, gba.waitcnt, gba.cycles, vblank_count);
+                last_waitcnt = gba.waitcnt;
+            }
+
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                println!("Palette[0]: {:04X}->{:04X} at cycle={} vblank={}",
+                    last_pal0, pal0, gba.cycles, vblank_count);
+                last_pal0 = pal0;
+                if pal0 == 0x0800 { break; }
+            }
+
+            // Trace SWI calls
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                if is_thumb {
+                    let instr = gba.mem_read16(pc);
+                    if (instr >> 8) == 0xDF {
+                        let swi_num = instr & 0xFF;
+                        println!("SWI {:02X} at cycle={} PC={:08X} R0={:08X} R1={:08X} R2={:08X}",
+                            swi_num, gba.cycles, pc,
+                            gba.regs[0], gba.regs[1], gba.regs[2]);
+                    }
+                } else {
+                    let instr = gba.mem_read32(pc);
+                    if (instr >> 24) & 0x0F == 0x0F {
+                        let swi_num = (instr >> 16) & 0xFF;
+                        println!("SWI {:02X} at cycle={} PC={:08X} R0={:08X} R1={:08X} R2={:08X}",
+                            swi_num, gba.cycles, pc,
+                            gba.regs[0], gba.regs[1], gba.regs[2]);
+                    }
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+        println!("Final: cycle={} waitcnt={:04X}", gba.cycles, gba.waitcnt);
+    }
+
+    #[test]
+    fn test_meteorain_swi_timing() {
+        // Profile SWI calls during init to find expensive ones.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let target = 4_300_000u64;
+        let mut swi_times: Vec<(u8, u64, u64)> = Vec::new(); // (num, start_cycle, duration)
+        let mut in_swi = false;
+        let mut swi_start = 0u64;
+        let mut swi_num = 0u8;
+        let mut last_pal0: u16 = 0xFFFF;
+
+        while (gba.cycles as u64) < target {
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                // Detect SWI entry
+                if is_thumb {
+                    let instr = gba.mem_read16(pc);
+                    if (instr >> 8) == 0xDF && !in_swi {
+                        in_swi = true;
+                        swi_num = (instr & 0xFF) as u8;
+                        swi_start = gba.cycles as u64;
+                    }
+                }
+
+                // Detect return from SWI (BX LR from BIOS at ~0x138)
+                if in_swi && pc < 0x4000 {
+                    // In BIOS
+                } else if in_swi && pc >= 0x08000000 {
+                    let dur = gba.cycles as u64 - swi_start;
+                    swi_times.push((swi_num, swi_start, dur));
+                    in_swi = false;
+                }
+            }
+
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                last_pal0 = pal0;
+                if pal0 == 0x0800 { break; }
+            }
+
+            gba.tick_one_cycle();
+        }
+
+        // Group by SWI number and sum cycles
+        let mut by_num: std::collections::HashMap<u8, (u64, u64)> = std::collections::HashMap::new();
+        for (num, _, dur) in &swi_times {
+            let e = by_num.entry(*num).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += dur;
+        }
+        let mut sorted: Vec<(u8, u64, u64)> = by_num.into_iter().map(|(k,v)| (k, v.0, v.1)).collect();
+        sorted.sort_by(|a, b| b.2.cmp(&a.2));
+        println!("SWI profile (total calls: {}):", swi_times.len());
+        for (num, count, total) in &sorted {
+            println!("  SWI {:02X}: {} calls, {} total cycles, {:.0} avg",
+                num, count, total, *total as f64 / *count as f64);
+        }
+        // Print first few of each SWI type
+        for swi in [0x01u8, 0x0Bu8, 0x0Cu8, 0x11u8, 0x05u8] {
+            let calls: Vec<_> = swi_times.iter().filter(|(n,_,_)| *n == swi).take(3).collect();
+            for (n, start, dur) in calls {
+                println!("  SWI {:02X} at cycle={} dur={}", n, start, dur);
+            }
+        }
+    }
 }
