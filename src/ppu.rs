@@ -214,9 +214,6 @@ impl Gba {
                 nibble
             };
 
-            if debug_line && x < 8 {
-                eprintln!("BG2 line=0 x={} tile_num={} py={} px={} color_idx={} map_off=0x{:X}", x, tile_num, py, px, color_idx, map_off);
-            }
             if color_idx == 0 { continue; }  // transparent
 
             let pal_off = if color256 {
@@ -225,9 +222,6 @@ impl Gba {
                 palette_num * 32 + color_idx * 2
             };
             let color = self.palette_read16(pal_off);
-            if debug_line && x < 8 {
-                eprintln!("  pal_off=0x{:X} color=0x{:04X}", pal_off, color);
-            }
             out[x as usize] = Some(color);
         }
     }

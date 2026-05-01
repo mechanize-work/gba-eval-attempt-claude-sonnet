@@ -32,11 +32,23 @@ impl Gba {
     fn arm_step(&mut self) {
         // PC is 8 ahead: fetch at PC-8. During execute, PC = instr_addr+8.
         let pc = self.regs[15].wrapping_sub(8);
+
+        // Instruction fetch cycles (S or N based on whether we just branched)
+        let fetch_cyc = if self.fetch_sequential {
+            self.mem_cycles_s(pc, 4)
+        } else {
+            self.mem_cycles_n(pc, 4)
+        };
+        self.stall_cycles += fetch_cyc;
+
         let instr = self.mem_read32(pc);
         self.branch_taken = false;
         self.arm_execute(instr);
         if !self.branch_taken {
+            self.fetch_sequential = true;
             self.regs[15] = self.regs[15].wrapping_add(4);
+        } else {
+            self.fetch_sequential = false;
         }
     }
 
@@ -887,11 +899,23 @@ impl Gba {
     fn thumb_step(&mut self) {
         // PC is 4 ahead: fetch at PC-4. During execute, PC = instr_addr+4.
         let pc = self.regs[15].wrapping_sub(4);
+
+        // Instruction fetch cycles (S or N based on whether we just branched)
+        let fetch_cyc = if self.fetch_sequential {
+            self.mem_cycles_s(pc, 2)
+        } else {
+            self.mem_cycles_n(pc, 2)
+        };
+        self.stall_cycles += fetch_cyc;
+
         let instr = self.mem_read16(pc) as u32;
         self.branch_taken = false;
         self.thumb_execute(instr);
         if !self.branch_taken {
+            self.fetch_sequential = true;
             self.regs[15] = self.regs[15].wrapping_add(2);
+        } else {
+            self.fetch_sequential = false;
         }
     }
 

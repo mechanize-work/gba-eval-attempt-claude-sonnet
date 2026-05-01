@@ -134,6 +134,11 @@ pub(crate) struct Gba {
 
     // Branch taken flag: set by any instruction that modifies PC
     pub branch_taken: bool,
+
+    // CPU timing / wait states
+    pub stall_cycles: u32,          // cycles consumed by current instruction
+    pub cpu_cycles_remaining: i32,  // cycles CPU is stalled (waiting for memory)
+    pub fetch_sequential: bool,     // true if last code fetch was sequential (no branch)
 }
 
 #[derive(Clone)]
@@ -314,6 +319,10 @@ impl Gba {
             cycles: 0, frame_cycles: 0,
             dma_pending: 0,
             branch_taken: false,
+
+            stall_cycles: 0,
+            cpu_cycles_remaining: 0,
+            fetch_sequential: false,
         };
 
         // Load BIOS stub
@@ -354,7 +363,7 @@ impl Gba {
         self.oam.iter_mut().for_each(|b| *b = 0);
 
         // Reset PPU
-        self.dispcnt = 0; self.dispstat = 0; self.vcount = 0;
+        self.dispcnt = 0x0080; self.dispstat = 0; self.vcount = 0;  // GBA resets with forced blank
         self.bgcnt = [0u16; 4]; self.bghofs = [0u16; 4]; self.bgvofs = [0u16; 4];
         self.bgpa = [0x100i16; 2]; self.bgpb = [0i16; 2];
         self.bgpc = [0i16; 2]; self.bgpd = [0x100i16; 2];
@@ -393,6 +402,9 @@ impl Gba {
         self.cycles = 0; self.frame_cycles = 0;
         self.dma_pending = 0;
         self.branch_taken = false;
+        self.stall_cycles = 0;
+        self.cpu_cycles_remaining = 0;
+        self.fetch_sequential = false;
 
         // Boot from ROM
         self.regs[15] = 0x08000008;
@@ -508,12 +520,20 @@ impl Gba {
         // Timer update
         self.tick_timers(1);
 
+        // If CPU is stalled for memory wait states, just advance hardware
+        if self.cpu_cycles_remaining > 0 {
+            self.cpu_cycles_remaining -= 1;
+            self.cycles += 1;
+            return;
+        }
+
         // Run DMA if pending (DMA runs at "start" of cycle before CPU)
         if self.dma_pending != 0 {
             self.run_pending_dma();
         }
 
         // Check interrupts and run CPU
+        self.stall_cycles = 0;
         if !self.halted {
             self.cpu_step();
         } else {
@@ -526,6 +546,11 @@ impl Gba {
         // Service interrupts after CPU step (only bit 0 of IME matters)
         if (self.ime & 1) != 0 && (self.if_ & self.ie) != 0 && !self.halted {
             self.cpu_do_irq();
+        }
+
+        // stall_cycles accumulated by memory accesses; CPU stalls for remaining cycles
+        if self.stall_cycles > 1 {
+            self.cpu_cycles_remaining = (self.stall_cycles - 1) as i32;
         }
 
         self.cycles += 1;

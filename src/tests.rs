@@ -141,11 +141,10 @@ mod tests {
         println!("Palette[0..8]: {:?}", &gba.palette[0..16]);
     }
 
-    #[test]
-    fn dump_frames_ppm() {
-        let mut gba = make_gba("/task/dev-roms/anguna.gba");
-        fs::create_dir_all("/tmp/my_frames").unwrap();
-        for i in 0..30 {
+    fn dump_frames(rom: &str, dir: &str, num_frames: usize) {
+        let mut gba = make_gba(rom);
+        fs::create_dir_all(dir).unwrap();
+        for i in 0..num_frames {
             gba.run_frame();
             let fb = &gba.framebuffer;
             let mut data = format!("P6\n240 160\n255\n").into_bytes();
@@ -155,9 +154,79 @@ mod tests {
                 let b = ((px >> 16) & 0xFF) as u8;
                 data.push(r); data.push(g); data.push(b);
             }
-            fs::write(format!("/tmp/my_frames/frame_{:05}.ppm", i), &data).unwrap();
+            fs::write(format!("{}/frame_{:05}.ppm", dir, i), &data).unwrap();
         }
+    }
+
+    fn compare_frames(oracle_dir: &str, my_dir: &str, num_frames: usize) {
+        let mut total_diffs = 0usize;
+        let mut total_pixels = 0usize;
+        let mut perfect = 0usize;
+        for i in 0..num_frames {
+            let oracle_path = format!("{}/frame_{:05}.ppm", oracle_dir, i);
+            let my_path = format!("{}/frame_{:05}.ppm", my_dir, i);
+            if !fs::metadata(&oracle_path).is_ok() || !fs::metadata(&my_path).is_ok() {
+                continue;
+            }
+            let mut read_ppm = |path: &str| {
+                let data = fs::read(path).unwrap();
+                // Skip header (3 lines)
+                let mut pos = 0;
+                for _ in 0..3 { while pos < data.len() && data[pos] != b'\n' { pos += 1; } pos += 1; }
+                data[pos..].to_vec()
+            };
+            let oracle = read_ppm(&oracle_path);
+            let mine = read_ppm(&my_path);
+            let pixels = oracle.len() / 3;
+            let diffs: usize = (0..oracle.len().min(mine.len())).step_by(3)
+                .filter(|&j| oracle[j..j+3] != mine[j..j+3]).count();
+            total_diffs += diffs;
+            total_pixels += pixels;
+            if diffs == 0 { perfect += 1; } else {
+                println!("  Frame {}: {} diffs ({:.1}%)", i, diffs, 100.0 * diffs as f32 / pixels as f32);
+            }
+        }
+        println!("Perfect: {}/{}, accuracy: {:.2}%", perfect, num_frames,
+            100.0 * (total_pixels - total_diffs) as f32 / total_pixels.max(1) as f32);
+    }
+
+    #[test]
+    fn dump_frames_ppm() {
+        dump_frames("/task/dev-roms/anguna.gba", "/tmp/my_frames", 30);
         println!("Wrote 30 frames to /tmp/my_frames/");
+    }
+
+    #[test]
+    fn test_meteorain_dispcnt() {
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut last_dispcnt = gba.dispcnt;
+        println!("Initial DISPCNT: 0x{:04X}", gba.dispcnt);
+        for cycle in 0..((280896u32 * 15)) {
+            let old = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old {
+                let frame = cycle / 280896;
+                println!("Cycle {cycle} (frame {frame}): DISPCNT 0x{:04X} -> 0x{:04X}", old, gba.dispcnt);
+                last_dispcnt = gba.dispcnt;
+            }
+        }
+        println!("Final DISPCNT: 0x{:04X}", last_dispcnt);
+    }
+
+    #[test]
+    fn test_compare_all_roms() {
+        let roms = [
+            ("anguna", "/task/dev-roms/anguna.gba", "/tmp/oracle_frames2", "/tmp/my_anguna"),
+            ("another-world", "/task/dev-roms/another-world.gba", "/tmp/oracle_another-world", "/tmp/my_another-world"),
+            ("meteorain", "/task/dev-roms/meteorain.gba", "/tmp/oracle_meteorain", "/tmp/my_meteorain"),
+            ("trogdor", "/task/dev-roms/trogdor.gba", "/tmp/oracle_trogdor", "/tmp/my_trogdor"),
+            ("xniq", "/task/dev-roms/xniq.gba", "/tmp/oracle_xniq", "/tmp/my_xniq"),
+        ];
+        for (name, rom, oracle_dir, my_dir) in &roms {
+            println!("\n=== {} ===", name);
+            dump_frames(rom, my_dir, 30);
+            compare_frames(oracle_dir, my_dir, 30);
+        }
     }
 
     #[test]
