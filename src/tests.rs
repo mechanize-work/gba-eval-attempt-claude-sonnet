@@ -3575,4 +3575,128 @@ mod tests {
         }
         println!("ISR call rate: {:.4} per outer iter", isr_durations.len() as f64 / outer_iters.max(1) as f64);
     }
+
+    #[test]
+    fn test_meteorain_module_iter_trace() {
+        // Trace what the module table iterator does when called at cycle ~3.97M.
+        // We want to see: what PC it calls (if any), what arguments it passes.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let target = 3_970_000u64;
+        while (gba.cycles as u64) < target {
+            gba.tick_one_cycle();
+        }
+
+        // Trace for 200K more cycles, recording any BL/BLX calls
+        let end = target + 200_000u64;
+        let mut in_iter = false;
+        let mut call_depth = 0i32;
+        let mut base_sp = 0u32;
+
+        while (gba.cycles as u64) < end {
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                if pc == 0x08015FEC && !in_iter {
+                    in_iter = true;
+                    call_depth = 0;
+                    base_sp = gba.regs[13];
+                    println!("ITER ENTRY: cycle={} R0={:08X} R1={:08X} SP={:08X}",
+                        gba.cycles, gba.regs[0], gba.regs[1], gba.regs[13]);
+                }
+
+                if in_iter && is_thumb {
+                    let instr = gba.mem_read16(pc);
+                    // BL/BLX: 0xF800..0xFFFF range (check upper 5 bits)
+                    let is_bl = (instr & 0xF800) == 0xF000;
+                    let is_blx = (instr & 0xFF00) == 0x4700;
+                    let is_bx = (instr & 0xFF87) == 0x4700;
+
+                    if is_bl || is_blx || is_bx {
+                        println!("  [depth={}] cycle={} PC={:08X} instr={:04X} R0={:08X} R1={:08X} LR={:08X}",
+                            call_depth, gba.cycles, pc, instr,
+                            gba.regs[0], gba.regs[1], gba.regs[14]);
+                    }
+
+                    // Track return from iter (when SP returns to base)
+                    if gba.regs[13] == base_sp && call_depth == 0 && pc != 0x08015FEC {
+                        // Might be near end of function
+                        if (instr & 0xFFC0) == 0x4700 || instr == 0xBDF0 || instr == 0xBD08 {
+                            println!("ITER EXIT: cycle={} PC={:08X} R0={:08X}",
+                                gba.cycles, pc, gba.regs[0]);
+                            in_iter = false;
+                        }
+                    }
+                }
+            }
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_meteorain_correct_ring_prime() {
+        // Prime ring buffer with correct entry: position=0, end=0x7FFFFFFF, data_ptr=0x08000000
+        // After ring buf init (cycle ~3.25M), inject a valid entry before dark blue starts.
+        // Measure dark blue duration to verify it becomes 63 frames.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        // Wait for ring buffer to be initialized (HEAD = 0x0300129C)
+        let mut ring_primed = false;
+        let mut dark_blue_active = false;
+        let mut iter_count = 0u64;
+        let mut dark_start_cycle = 0u64;
+        let mut last_pal0: u16 = 0xFFFF;
+
+        for _ in 0..(200_000_000u64) {
+            // Check if ring buffer is initialized
+            if !ring_primed {
+                let head = u32::from_le_bytes(gba.iram[0x12CC..0x12D0].try_into().unwrap());
+                let tail = u32::from_le_bytes(gba.iram[0x12D0..0x12D4].try_into().unwrap());
+                if head == 0x0300129C && tail == 0x0300129C {
+                    // Ring buffer initialized! Write a persistent entry.
+                    // Entry at IRAM[0x129C..0x12AC]:
+                    //   [+0] position = 0
+                    //   [+4] end = 0x7FFFFFFF (never dequeue)
+                    //   [+8] data_ptr = 0x08000000 (valid ROM)
+                    //   [+12] padding = 0
+                    gba.iram[0x129C..0x12A0].copy_from_slice(&0u32.to_le_bytes());
+                    gba.iram[0x12A0..0x12A4].copy_from_slice(&0x7FFFFFFFu32.to_le_bytes());
+                    gba.iram[0x12A4..0x12A8].copy_from_slice(&0x08000000u32.to_le_bytes());
+                    gba.iram[0x12A8..0x12AC].copy_from_slice(&0u32.to_le_bytes());
+                    // Set TAIL = HEAD + 0x10 = 0x030012AC
+                    gba.iram[0x12D0..0x12D4].copy_from_slice(&0x030012ACu32.to_le_bytes());
+                    ring_primed = true;
+                    println!("Ring buffer primed at cycle={}", gba.cycles);
+                }
+            }
+
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                println!("Palette change: {:04X}->{:04X} at cycle={} frame={}",
+                    last_pal0, pal0, gba.cycles, gba.cycles / 280896);
+                last_pal0 = pal0;
+                if pal0 == 0x0800 {
+                    dark_blue_active = true;
+                    dark_start_cycle = gba.cycles;
+                } else if dark_blue_active {
+                    dark_blue_active = false;
+                    let duration = gba.cycles - dark_start_cycle;
+                    println!("Dark blue: {} cycles = {:.1} frames, {} iters, {:.1} cyc/iter",
+                        duration, duration as f64 / 280896.0,
+                        iter_count, duration as f64 / iter_count.max(1) as f64);
+                    break;
+                }
+            }
+
+            if dark_blue_active && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                if is_thumb {
+                    let pc = gba.regs[15].wrapping_sub(4);
+                    if pc == 0x08016FD2 { iter_count += 1; }
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
 }
