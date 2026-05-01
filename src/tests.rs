@@ -4062,6 +4062,41 @@ mod tests {
     }
 
     #[test]
+    fn test_anguna_init_flow() {
+        // Trace every unique PC in the first 280K cycles to understand init
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let mut last_pc = 0xFFFFFFFFu32;
+        let mut seen = std::collections::HashSet::new();
+        let mut cycle = 0u64;
+
+        while gba.cycles < 280896 {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            if pc != last_pc && seen.insert(pc) {
+                let mode = if is_thumb { "T" } else { "A" };
+                let r = &gba.regs;
+                // Only print ROM code (0x08xxxxxx) and BIOS
+                if (pc >= 0x08000000 && pc < 0x08000500) || pc < 0x4000 {
+                    println!("{:08X}:{} r0={:08X} r1={:08X} r2={:08X} r13={:08X} r14={:08X} cy={}",
+                        pc, mode, r[0], r[1], r[2], r[13], r[14], gba.cycles);
+                }
+            }
+            last_pc = pc;
+
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("  >> DISPCNT {:04X} -> {:04X} at cycle {} PC={:08X}",
+                    old_dc, gba.dispcnt, gba.cycles, pc);
+            }
+        }
+        println!("Total cycles: {}", gba.cycles);
+    }
+
+    #[test]
     fn test_anguna_ewram_speed() {
         // Profile how fast the fill loop actually runs with current timing
         // and compare with expected oracle timing
