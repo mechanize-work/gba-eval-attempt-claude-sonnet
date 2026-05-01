@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn test_meteorain_loop_trace() {
+    fn test_meteorain_init_loops() {
         let mut gba = make_gba("/task/dev-roms/meteorain.gba");
 
         let mut fill_loop_iters = 0u64;
@@ -1884,6 +1884,67 @@ mod tests {
                         }
                     }
                     iter_count += 1;
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_meteorain_loop_trace() {
+        // Trace one full outer iteration of the dark blue search loop at 0x08016FD2
+        // Shows per-instruction cycle counts to find where our emulator differs from oracle (145.8 vs 130.9 cyc/iter)
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut dark_blue_found = false;
+        let mut outer_iter = 0u32;
+        let mut start_cycle = 0u64;
+        let mut insn_log: Vec<(u32, u32, u32)> = Vec::new(); // (pc, encoding, stall_cycles)
+
+        for _ in 0..(30_000_000u64 * 3) {
+            // Detect dark blue
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !dark_blue_found {
+                dark_blue_found = true;
+            }
+
+            // When CPU is about to execute next instruction (not stalled, not halted)
+            if dark_blue_found && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                if is_thumb && pc == 0x08016FD2 {
+                    outer_iter += 1;
+                    if outer_iter == 1 {
+                        start_cycle = gba.cycles;
+                    } else if outer_iter == 2 {
+                        // Done: print one full outer iteration trace
+                        let total = gba.cycles - start_cycle;
+                        println!("One outer iteration: {} cycles ({} instructions)", total, insn_log.len());
+                        println!("{:8}  {:4}  {:3}  fetch_seq", "PC", "ENC", "CYC");
+                        for (ipc, enc, cyc) in &insn_log {
+                            println!("  {:08X}  {:04X}   {}", ipc, enc, cyc);
+                        }
+                        break;
+                    }
+                }
+
+                // If tracing (between iter 1 and 2), record this instruction
+                if outer_iter == 1 {
+                    let enc = if is_thumb {
+                        gba.mem_read16(pc) as u32
+                    } else {
+                        gba.mem_read32(pc)
+                    };
+                    // Execute instruction via tick, then read stall_cycles
+                    gba.tick_one_cycle();
+                    insn_log.push((pc, enc, gba.stall_cycles));
+                    // Drain stall cycles (other hw ticks but CPU not executing)
+                    while gba.cpu_cycles_remaining > 0 {
+                        gba.tick_one_cycle();
+                    }
+                    continue;
                 }
             }
 
