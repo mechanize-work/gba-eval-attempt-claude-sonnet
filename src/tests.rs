@@ -4286,4 +4286,107 @@ mod tests {
             println!("No palette writes in first 2 frames!");
         }
     }
+
+    #[test]
+    fn test_init_pc_profile() {
+        // Profile cycle distribution during init (until forced blank cleared) for anguna/trogdor/xniq.
+        // Goal: find where time is spent - ROM vs IRAM vs WRAM vs BIOS.
+        for (name, rom) in [
+            ("anguna", "/task/dev-roms/anguna.gba"),
+            ("trogdor", "/task/dev-roms/trogdor.gba"),
+            ("xniq", "/task/dev-roms/xniq.gba"),
+        ] {
+            let mut gba = make_gba(rom);
+            let mut region_cycles: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+            let mut prev_cycles = gba.cycles;
+            let mut last_pc_region = 0u32;
+            let mut last_dispcnt = gba.dispcnt;
+
+            for _ in 0..5_000_000u32 {
+                if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                    let is_thumb = (gba.cpsr & 0x20) != 0;
+                    let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                    let elapsed = gba.cycles - prev_cycles;
+                    if elapsed > 0 {
+                        *region_cycles.entry(last_pc_region).or_insert(0) += elapsed as u64;
+                        prev_cycles = gba.cycles;
+                        last_pc_region = pc >> 24;
+                    }
+                }
+
+                let old_dc = gba.dispcnt;
+                gba.tick_one_cycle();
+                if (old_dc & 0x80) != 0 && (gba.dispcnt & 0x80) == 0 {
+                    println!("{}: Forced blank cleared at cycle {} = frame {:.2}",
+                        name, gba.cycles, gba.cycles as f64 / 280896.0);
+                    last_dispcnt = gba.dispcnt;
+                    break;
+                }
+            }
+
+            let total: u64 = region_cycles.values().sum();
+            let mut sorted: Vec<(u32, u64)> = region_cycles.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            println!("  Cycle distribution (total={}):", total);
+            for (region, cycles) in sorted.iter().take(10) {
+                let label = match *region {
+                    0x00 => "BIOS",
+                    0x02 => "WRAM",
+                    0x03 => "IRAM",
+                    0x04 => "IO",
+                    0x08..=0x0D => "ROM",
+                    _ => "OTHER",
+                };
+                println!("    PC 0x{:02X}xxxxxx ({}): {} cycles ({:.1}%)",
+                    region, label, cycles, 100.0 * *cycles as f64 / total as f64);
+            }
+        }
+    }
+
+    #[test]
+    fn test_trogdor_anguna_instruction_mix() {
+        // Count instruction types in trogdor's init to understand cycle cost vs oracle.
+        // Also count N-cycle vs S-cycle fetches.
+        for (name, rom) in [
+            ("trogdor", "/task/dev-roms/trogdor.gba"),
+            ("anguna", "/task/dev-roms/anguna.gba"),
+        ] {
+            let mut gba = make_gba(rom);
+            let mut n_insns = 0u64;
+            let mut total_cycles = 0u64;
+            let mut branch_count = 0u64;
+            let mut ldr_count = 0u64;
+
+            for _ in 0..5_000_000u32 {
+                if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                    let is_thumb = (gba.cpsr & 0x20) != 0;
+                    let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                    if is_thumb {
+                        let instr = gba.mem_read16(pc);
+                        // Count branches: 0xD0-0xDF (Bcond), 0xE0 (B), 0xF000-0xF7FF (BL), 0x4700 (BX)
+                        let hi = instr >> 8;
+                        if (hi >= 0xD0 && hi <= 0xDF) || hi == 0xE0 || (hi >> 3) == 0x1E || hi == 0x47 {
+                            branch_count += 1;
+                        }
+                        // Count LDR: format 6 (0x48-0x4F), format 7 load (0x58-0x5F)
+                        if (hi >= 0x48 && hi <= 0x4F) || (hi >= 0x68 && hi <= 0x6F) || (hi >= 0x78 && hi <= 0x7F) {
+                            ldr_count += 1;
+                        }
+                    }
+                    n_insns += 1;
+                }
+
+                let old_cycles = gba.cycles;
+                let old_dc = gba.dispcnt;
+                gba.tick_one_cycle();
+                total_cycles += (gba.cycles - old_cycles) as u64;
+                if (old_dc & 0x80) != 0 && (gba.dispcnt & 0x80) == 0 {
+                    break;
+                }
+            }
+            println!("{}: insns={}, total_cycles={}, branches={}, ldrs={}",
+                name, n_insns, total_cycles, branch_count, ldr_count);
+            println!("  avg cycles/insn: {:.3}", total_cycles as f64 / n_insns as f64);
+        }
+    }
 }
