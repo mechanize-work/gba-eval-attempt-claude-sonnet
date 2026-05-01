@@ -404,7 +404,7 @@ impl Gba {
         self.keyinput = 0x03FF;
         self.keycnt = 0;
         // Hardware default: WAITCNT=0 (BIOS stub does not set it; real BIOS sets 0x4317 but oracle uses stub)
-        self.waitcnt = 0x0000; self.memcnt = 0x0D000020; self.postflg = 0; self.haltcnt = 0;
+        self.waitcnt = 0x0000; self.memcnt = 0x0D000020; self.postflg = 1; self.haltcnt = 0;
         self.cycles = 0; self.frame_cycles = 0;
         self.dma_pending = 0;
         self.branch_taken = false;

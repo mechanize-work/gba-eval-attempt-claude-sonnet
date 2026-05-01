@@ -3950,4 +3950,51 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_meteorain_init_profile() {
+        // Profile which PC regions consume cycles from start to SWI05.
+        // Goal: find what takes 561K extra cycles vs oracle (2 frames).
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        // Count cycles per 0x10000 (64KB) ROM region, and total non-ROM
+        let mut region_cycles: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        let mut prev_cycles = gba.cycles;
+        let mut last_pc = gba.regs[15];
+        let mut found_swi05 = false;
+
+        for _ in 0..5_000_000_000u64 {
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                let elapsed = gba.cycles - prev_cycles;
+                if elapsed > 0 {
+                    *region_cycles.entry(last_pc >> 16).or_insert(0) += elapsed as u64;
+                    prev_cycles = gba.cycles;
+                    last_pc = pc;
+                }
+
+                // Detect SWI 05
+                if is_thumb {
+                    let instr = gba.mem_read16(pc);
+                    if (instr >> 8) == 0xDF && (instr & 0xFF) == 5 {
+                        found_swi05 = true;
+                        println!("SWI05 at cycle={}", gba.cycles);
+                        break;
+                    }
+                }
+            }
+            gba.tick_one_cycle();
+        }
+
+        // Print top regions
+        let mut sorted: Vec<(u32, u64)> = region_cycles.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        println!("PC region (64KB) profile up to SWI05 (total={}):", sorted.iter().map(|x| x.1).sum::<u64>());
+        for (region, cycles) in sorted.iter().take(20) {
+            println!("  PC 0x{:04X}xxxx: {} cycles ({:.1}%)",
+                region, cycles, *cycles as f64 / sorted.iter().map(|x| x.1).sum::<u64>() as f64 * 100.0);
+        }
+        assert!(found_swi05, "SWI05 not found");
+    }
 }
