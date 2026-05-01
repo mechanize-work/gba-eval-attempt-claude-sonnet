@@ -1855,6 +1855,18 @@ mod tests {
                         first_r5 = gba.regs[5];
                         println!("First R5={:08X} R7={:08X} WAITCNT=0x{:04X} MEMCNT=0x{:08X}",
                             gba.regs[5], gba.regs[7], gba.waitcnt, gba.memcnt);
+                        println!("IME=0x{:X} IE=0x{:04X} IF=0x{:04X}",
+                            gba.ime, gba.ie, gba.if_);
+                        for ch in 0..4 {
+                            let d = &gba.dma[ch];
+                            println!("DMA{}: ctrl=0x{:04X} src=0x{:08X} dst=0x{:08X} cnt={}",
+                                ch, d.ctrl, d.src_raw, d.dst_raw, d.cnt_raw);
+                        }
+                        for t in 0..4 {
+                            let tm = &gba.timers[t];
+                            println!("Timer{}: counter={} reload={} ctrl=0x{:04X} enabled={} irq={} prescaler={}",
+                                t, tm.counter, tm.reload, tm.ctrl, tm.enabled, tm.irq, tm.prescaler);
+                        }
                     }
                     iter_count += 1;
                 }
@@ -1984,6 +1996,8 @@ mod tests {
         let iter_start_cycle = gba.cycles;
         let mut iter_count = 0u32;
         let mut total_insns = 0u64;
+        let mut arm_cycles = 0u64;
+        let mut arm_insns = 0u64;
 
         for _ in 0..500_000 {
             if gba.cpu_cycles_remaining == 0 && !gba.halted {
@@ -2001,6 +2015,12 @@ mod tests {
                         if iter_count >= 100 { break; }
                     }
                     continue;
+                } else {
+                    // ARM mode instruction (e.g., IRQ handler)
+                    gba.tick_one_cycle();
+                    arm_cycles += gba.stall_cycles as u64;
+                    arm_insns += 1;
+                    continue;
                 }
             }
             gba.tick_one_cycle();
@@ -2009,6 +2029,8 @@ mod tests {
         let total_cycles = gba.cycles as i64 - iter_start_cycle as i64;
         println!("100 iterations: {} total cycles, {:.1} avg cycles/iter, {} insns total",
             total_cycles, total_cycles as f64 / iter_count as f64, total_insns);
+        println!("ARM mode: {} instructions, {} cycles ({:.2}/iter)",
+            arm_insns, arm_cycles, arm_cycles as f64 / iter_count as f64);
 
         // Print in PC order
         let mut sorted: Vec<_> = pc_cycles.into_iter().collect();
