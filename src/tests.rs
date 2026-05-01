@@ -2805,6 +2805,183 @@ mod tests {
     }
 
     #[test]
+    fn test_meteorain_audio_trace() {
+        // Trace calls to the audio scheduling functions to understand the ring buffer problem.
+        // Key addresses:
+        //   0x080198E0 = audio scheduler function (contains BL to 0x0801A66A)
+        //   0x08019936 = BL to ring buffer fill fn (0x0801A66A)
+        //   0x0801A66A = ring buffer fill fn (sets tail = head - 16 when empty)
+        //   0x08019868 = Timer1 ISR ROM function (reads ring buffer)
+        //   0x08019892 = BEQ in Timer1 ISR (taken=SHORT, not taken=LONG)
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut dark_blue_found = false;
+        let mut call_counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+
+        let trace_pcs: std::collections::HashSet<u32> = [
+            0x080198E0u32, // audio scheduler entry
+            0x08019936u32, // BL to fill fn (reach = fill fn called)
+            0x0801A66Au32, // fill fn entry
+            0x08019892u32, // Timer1 ISR BEQ (taken=short, not taken=long)
+        ].iter().copied().collect();
+
+        let mut last_beg_taken = 0u32;
+        let mut last_beg_notaken = 0u32;
+        let mut printed_events = 0u32;
+
+        for _ in 0..(30_000_000u64 * 3) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !dark_blue_found {
+                dark_blue_found = true;
+                println!("=== DARK BLUE START at cycle {} ===", gba.cycles);
+                for (k, v) in &call_counts {
+                    println!("  PC=0x{:08X} was reached {} times before dark blue", k, v);
+                }
+            }
+            if dark_blue_found && pal0 != 0x0800 { break; }
+
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                if is_thumb {
+                    let pc = gba.regs[15].wrapping_sub(4);
+                    if trace_pcs.contains(&pc) {
+                        *call_counts.entry(pc).or_insert(0) += 1;
+                        if printed_events < 20 {
+                            let phase = if dark_blue_found { "DARK" } else { "INIT" };
+                            println!("[{}] cycle={} PC=0x{:08X} r0={:08X} r1={:08X} mode={:02X}",
+                                phase, gba.cycles, pc,
+                                gba.regs[0], gba.regs[1], gba.cpsr & 0x1F);
+                            printed_events += 1;
+                        }
+                    }
+                    if pc == 0x08019892 {
+                        // BEQ: check if taken (R1==R3 means head==tail)
+                        let r1 = gba.regs[1];
+                        let r3 = gba.regs[3];
+                        if r1 == r3 {
+                            last_beg_taken += 1;
+                        } else {
+                            last_beg_notaken += 1;
+                        }
+                    }
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+
+        println!("BEQ at 0x08019892: SHORT={} LONG={}", last_beg_taken, last_beg_notaken);
+        println!("Final call counts:");
+        let mut sorted: Vec<_> = call_counts.into_iter().collect();
+        sorted.sort_by_key(|e| e.0);
+        for (pc, count) in sorted {
+            println!("  0x{:08X}: {} times", pc, count);
+        }
+    }
+
+    #[test]
+    fn test_meteorain_isr_costs() {
+        // Measure actual VBlank ISR vs Timer1 ISR costs during dark blue.
+        // Distinguish by checking IF register (bit 0=VBlank, bit 4=Timer1).
+        // Also count how many VBlank ISRs visit 0x080198E0 (audio scheduler).
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut dark_blue_found = false;
+        let mut in_irq = false;
+        let mut irq_start_cycle = 0u64;
+        let mut irq_if_bits = 0u16;
+
+        let mut vblank_count = 0u32;
+        let mut timer1_count = 0u32;
+        let mut vblank_total_cycles = 0u64;
+        let mut timer1_total_cycles = 0u64;
+        let mut first_vblank_regions: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut tracing_first_vblank = false;
+        let mut visited_0801a5b0 = false;
+        let mut visited_080198e0 = false;
+
+        for _ in 0..(30_000_000u64 * 3) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 == 0x0800 && !dark_blue_found {
+                dark_blue_found = true;
+                println!("Dark blue at cycle {}", gba.cycles);
+            }
+            if dark_blue_found && pal0 != 0x0800 { break; }
+
+            if dark_blue_found && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let mode = (gba.cpsr & 0x1F) as u8;
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                // Detect IRQ entry (mode switches to IRQ = 0x12, in BIOS)
+                if !in_irq && mode == 0x12 && pc < 0x4000 {
+                    in_irq = true;
+                    irq_start_cycle = gba.cycles;
+                    // Read the IF register to determine IRQ type (IF & IE = pending)
+                    irq_if_bits = gba.if_ & (gba.ie as u16);
+                }
+
+                if in_irq && tracing_first_vblank {
+                    if is_thumb {
+                        first_vblank_regions.insert(pc & !0xF);
+                        if pc >= 0x0801A5B0 && pc < 0x0801A600 { visited_0801a5b0 = true; }
+                        if pc >= 0x080198E0 && pc < 0x08019946 { visited_080198e0 = true; }
+                    }
+                }
+
+                // Detect return to search loop
+                if in_irq && is_thumb && pc >= 0x08016FD0 && pc <= 0x08017020 {
+                    let irq_cost = gba.cycles - irq_start_cycle;
+                    let has_vblank = (irq_if_bits & 1) != 0;
+                    let has_timer1 = (irq_if_bits & 0x10) != 0;
+                    if has_vblank {
+                        vblank_count += 1;
+                        vblank_total_cycles += irq_cost;
+                        if vblank_count == 1 {
+                            println!("First VBlank ISR: {} cycles, IF=0x{:04X} visited_audio={}",
+                                irq_cost, irq_if_bits, visited_0801a5b0);
+                            let mut rgns: Vec<_> = first_vblank_regions.iter().collect();
+                            rgns.sort();
+                            println!("  Regions: {:?}", rgns.iter().map(|a| format!("{:08X}", a)).collect::<Vec<_>>());
+                        }
+                        tracing_first_vblank = false;
+                    } else if has_timer1 {
+                        timer1_count += 1;
+                        timer1_total_cycles += irq_cost;
+                    } else {
+                        println!("Unknown ISR: IF=0x{:04X} cost={}", irq_if_bits, irq_cost);
+                    }
+                    in_irq = false;
+                    irq_if_bits = 0;
+                    // Start tracing the next VBlank
+                    if has_vblank && vblank_count == 0 { tracing_first_vblank = true; }
+                }
+
+                if !in_irq && is_thumb && (pc == 0x08016FD2 || pc == 0x08017000) {
+                    // Check if next IRQ will be VBlank
+                    let ie = (gba.iram[0x3ff8] as u16) | ((gba.iram[0x3ff9] as u16) << 8);
+                    let _ = ie;
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+
+        println!("VBlank ISRs: {} total, {} total cycles, {:.1} avg",
+            vblank_count, vblank_total_cycles,
+            vblank_total_cycles as f64 / vblank_count.max(1) as f64);
+        println!("Timer1 ISRs: {} total, {} total cycles, {:.1} avg",
+            timer1_count, timer1_total_cycles,
+            timer1_total_cycles as f64 / timer1_count.max(1) as f64);
+
+        // Calculate what oracle needs
+        let total_loop_cycles = 15879900u64; // from waitcnt test
+        let timer1_isr_cycles_total = timer1_total_cycles + (vblank_count as u64 * 425); // estimate
+        println!("Approx avg loop = {:.1} cyc/iter",
+            total_loop_cycles as f64 / 121356.0);
+    }
+
+    #[test]
     fn test_meteorain_vblank_isr_trace() {
         // Trace the VBlank ISR during dark blue to see if it calls the audio fill function
         // The ring buffer producer should be called from somewhere: VBlank ISR or Timer1 ISR?
