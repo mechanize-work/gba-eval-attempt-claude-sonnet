@@ -3981,6 +3981,67 @@ mod tests {
     }
 
     #[test]
+    fn test_another_world_dispcnt_trace() {
+        let mut gba = make_gba("/task/dev-roms/another-world.gba");
+        let mut last_dispcnt = gba.dispcnt;
+        let mut vblank_count = 0u32;
+        let mut last_scanline = 0u32;
+        let mut halt_count = 0u32;
+        let mut last_halted = false;
+
+        while gba.cycles < 3_000_000 {
+            if gba.scanline == 160 && last_scanline != 160 {
+                vblank_count += 1;
+            }
+            last_scanline = gba.scanline;
+
+            if gba.halted != last_halted {
+                if gba.halted { halt_count += 1; }
+                last_halted = gba.halted;
+            }
+
+            if gba.dispcnt != last_dispcnt {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("DISPCNT 0x{:04X}->0x{:04X}: cycle={} frame={} scanline={} PC={:08X} vblanks={}",
+                    last_dispcnt, gba.dispcnt, gba.cycles, gba.cycles / 280896, gba.scanline, pc, vblank_count);
+                last_dispcnt = gba.dispcnt;
+            }
+
+            gba.tick_one_cycle();
+        }
+        println!("End: frame={} halts={} vblanks={}", gba.cycles / 280896, halt_count, vblank_count);
+    }
+
+    #[test]
+    fn test_another_world_animation_timing() {
+        // Trace when each animation step starts, measuring cycles per step.
+        // Goal: understand why mine is 3 frames behind oracle (oracle starts animation at frame 4).
+        let mut gba = make_gba("/task/dev-roms/another-world.gba");
+        let mut last_colors: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        last_colors.insert(0xFFFFFF);
+        let mut last_step_cycle = 0u64;
+
+        // Also trace DISPCNT and specific IO writes
+        let mut last_dispcnt = gba.dispcnt;
+        let mut last_palette0 = 0u16;
+
+        for frame in 0..20 {
+            gba.run_frame();
+            let cycle = gba.cycles;
+            let current_colors: std::collections::HashSet<u32> =
+                gba.framebuffer.iter().map(|&p| p & 0xFFFFFF).collect();
+            if current_colors != last_colors {
+                println!("Frame {:2}: {} colors (was {}), cycle={}, delta={}, palette[0]={:04X}",
+                    frame, current_colors.len(), last_colors.len(),
+                    cycle, cycle - last_step_cycle, gba.palette[0] as u16 | ((gba.palette[1] as u16) << 8));
+                last_step_cycle = cycle;
+                last_colors = current_colors;
+            }
+        }
+    }
+
+    #[test]
     fn test_meteorain_init_profile() {
         // Profile which PC regions consume cycles from start to SWI05.
         // Goal: find what takes 561K extra cycles vs oracle (2 frames).
