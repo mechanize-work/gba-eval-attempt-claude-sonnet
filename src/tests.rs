@@ -1455,4 +1455,237 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_meteorain_vblankintr() {
+        // Trace SWI calls for meteorain to see if VBlankIntrWait (SWI 5) works correctly
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut last_scanline = 0u16;
+        let mut swi_count = [0u32; 256];
+        let mut vblank_count = 0u32;
+        let mut last_pc = 0u32;
+
+        // Run for 50 frames
+        for _ in 0..(280896u32 * 50) {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+            // Detect SWI instructions (Thumb: 0xDFxx)
+            if is_thumb && pc != last_pc {
+                // Check if current instruction is SWI
+                let rom = if pc >= 0x08000000 { pc - 0x08000000 } else { 0 };
+                if rom < gba.rom.len() as u32 {
+                    let instr = (gba.rom[rom as usize] as u16) | ((gba.rom[rom as usize + 1] as u16) << 8);
+                    if (instr >> 8) == 0xDF {
+                        let swi_num = (instr & 0xFF) as usize;
+                        swi_count[swi_num] += 1;
+                        if swi_count[swi_num] <= 3 {
+                            println!("SWI {} at PC={:08X} cycle={} frame={}",
+                                swi_num, pc, gba.cycles, gba.cycles / 280896);
+                        }
+                    }
+                }
+                last_pc = pc;
+            }
+
+            // Count VBlanks
+            if gba.vcount == 160 && last_scanline == 159 {
+                vblank_count += 1;
+            }
+            last_scanline = gba.vcount;
+
+            gba.tick_one_cycle();
+        }
+
+        println!("Total SWI counts:");
+        for (i, &cnt) in swi_count.iter().enumerate() {
+            if cnt > 0 { println!("  SWI {}: {} times", i, cnt); }
+        }
+        println!("Total VBlanks: {}", vblank_count);
+    }
+
+    #[test]
+    fn test_meteorain_game_speed() {
+        // Check how many instruction executions happen per frame for meteorain
+        // Compare with oracle to understand speed difference
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut last_frame = 0u64;
+        let mut instr_count = 0u64;
+        let mut halt_cycles = 0u64;
+        let mut in_halt = false;
+
+        for _ in 0..(280896u64 * 50) as u32 {
+            let frame = gba.cycles / 280896;
+
+            if frame != last_frame {
+                if last_frame >= 10 && last_frame <= 15 {
+                    println!("Frame {}: {} instrs, {} halt_cycles",
+                        last_frame, instr_count, halt_cycles);
+                }
+                instr_count = 0;
+                halt_cycles = 0;
+                last_frame = frame;
+            }
+
+            if gba.halted {
+                halt_cycles += 1;
+                in_halt = true;
+            } else {
+                if in_halt { in_halt = false; }
+                if gba.cpu_cycles_remaining == 0 {
+                    instr_count += 1;
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_meteorain_wait_mechanism() {
+        // Understand what busy-wait loop meteorain uses for frame pacing
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let target_cycle = 3u64 * 280896;
+        while (gba.cycles as u64) < target_cycle {
+            gba.tick_one_cycle();
+        }
+        println!("After 3 frames (cycle {}): VCOUNT={}, DISPSTAT={:04X}",
+            gba.cycles, gba.vcount, gba.dispstat);
+        for i in 0..4 {
+            println!("TM{}CNT_L={:04X} TM{}CNT_H={:04X}",
+                i, gba.timers[i].counter, i, gba.timers[i].ctrl);
+        }
+    }
+
+    #[test]
+    fn test_meteorain_vcount_trace2() {
+        // Identify callers of the tight loop at 0x08000190 and what R0/R1 they pass
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        // Run past init to frame 1
+        let frame_start = 280896u64;
+        while (gba.cycles as u64) < frame_start {
+            gba.tick_one_cycle();
+        }
+
+        let frame_end = frame_start + 280896 * 3;
+        let mut call_count = 0u32;
+        let mut last_caller = 0u32;
+
+        while (gba.cycles as u64) < frame_end {
+            if !gba.halted && gba.cpu_cycles_remaining == 0 {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                if is_thumb {
+                    let pc = gba.regs[15].wrapping_sub(4);
+                    // Detect entry to loop at 0x08000190
+                    if pc == 0x08000190 {
+                        let caller = gba.regs[14]; // LR = return address
+                        if caller != last_caller || call_count < 5 {
+                            println!("Loop called: cycle={} R0={:08X} R1={:08X} LR={:08X} VCOUNT={}",
+                                gba.cycles, gba.regs[0], gba.regs[1], caller, gba.vcount);
+                            last_caller = caller;
+                        }
+                        call_count += 1;
+                    }
+                    // Detect return from loop (BX LR at 0x08000196)
+                    if pc == 0x08000196 && call_count > 0 {
+                        println!("Loop return: cycle={} iterations_done={} R0={:08X} VCOUNT={}",
+                            gba.cycles, gba.regs[1]/4, gba.regs[0], gba.vcount);
+                    }
+                }
+            }
+            gba.tick_one_cycle();
+        }
+        println!("Total loop calls in 3 frames: {}", call_count);
+    }
+
+    #[test]
+    fn test_meteorain_frame34() {
+        // Investigate why meteorain goes all-black starting at frame 34
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        // Run to near frame 34
+        let target_cycle = 34u64 * 280896;
+        let mut last_dispcnt = gba.dispcnt;
+        let mut last_pal0: u16 = 0;
+
+        while (gba.cycles as u64) < target_cycle + 280896 * 2 {
+            // Check palette[0] (backdrop color)
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("Cycle {}: Palette[0] changed {:04X} -> {:04X} PC={:08X} Frame={}",
+                    gba.cycles, last_pal0, pal0, pc, gba.cycles / 280896);
+                last_pal0 = pal0;
+            }
+
+            // Check DISPCNT changes
+            if gba.dispcnt != last_dispcnt {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("Cycle {}: DISPCNT {:04X} -> {:04X} PC={:08X} Frame={}",
+                    gba.cycles, last_dispcnt, gba.dispcnt, pc, gba.cycles / 280896);
+                last_dispcnt = gba.dispcnt;
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_meteorain_palette_loop() {
+        // Trace what loop controls the dark-blue-screen duration
+        // Oracle: dark blue frames 13-76 (64 frames), we: ~2-34 (32 frames)
+        // The loop at 0x080184D4 (STRH R0,[R4,#0]) writes to palette
+        // and the outer loop at 0x080184B4 appears to control frame count
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        // Run to cycle ~2M to get past init
+        let start_cycle = 2_000_000u64;
+        while (gba.cycles as u64) < start_cycle {
+            gba.tick_one_cycle();
+        }
+
+        let end_cycle = 12_000_000u64;
+        let mut vblank_count = 0u32;
+        let mut last_vcount = gba.vcount;
+        let mut last_pal0: u16 = 0;
+        let mut loop_frame_counter: Option<u32> = None;
+
+        while (gba.cycles as u64) < end_cycle {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("pal0 {:04X}->{:04X} cycle={} frame={} vblank_count={}",
+                    last_pal0, pal0, gba.cycles, gba.cycles/280896, vblank_count);
+                last_pal0 = pal0;
+            }
+
+            if gba.vcount == 160 && last_vcount != 160 {
+                vblank_count += 1;
+            }
+            last_vcount = gba.vcount;
+
+            // Detect the outer loop counter - watch for reads from a "frame counter" address
+            // Track when PC is at 0x080184B4 and capture R1 (likely loop counter)
+            if !gba.halted && gba.cpu_cycles_remaining == 0 {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                if is_thumb {
+                    let pc = gba.regs[15].wrapping_sub(4);
+                    if pc == 0x080184B4 {
+                        if loop_frame_counter.map_or(true, |v| v != gba.regs[1]) {
+                            println!("  loop@{:08X}: R0={:08X} R1={:08X} R2={:08X} R3={:08X} R4={:08X} VCOUNT={}",
+                                pc, gba.regs[0], gba.regs[1], gba.regs[2], gba.regs[3], gba.regs[4], gba.vcount);
+                            loop_frame_counter = Some(gba.regs[1]);
+                        }
+                    }
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
 }
