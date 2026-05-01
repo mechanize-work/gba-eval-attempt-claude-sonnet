@@ -3304,6 +3304,7 @@ mod tests {
         }
 
         // Find and print unique function entries (PUSH with LR) in the look-back window
+        // (NOTE: see test_meteorain_music_init_trace for focused music init tracing)
         let start_cycle = if target_cycle > look_back { target_cycle - look_back } else { 0 };
         println!("\n=== Function entries (PUSH..LR) in cycles {}-{} ===", start_cycle, target_cycle);
         let mut seen_fns = std::collections::HashSet::new();
@@ -3334,5 +3335,244 @@ mod tests {
                 println!("  cycle={} pc={:#010x}", cyc, pc);
             }
         }
+    }
+
+    #[test]
+    fn test_meteorain_music_init_trace() {
+        // Trace all function entries during cycles 3880000-3950000 (0x0801A250 init window)
+        // to find why 0x080156C4 (music module init -> ring buffer) is never called.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut cycle: u64 = 0;
+        let start_cycle: u64 = 3_880_000;
+        let end_cycle: u64 = 3_950_000;
+
+        while cycle < start_cycle {
+            gba.tick_one_cycle();
+            cycle += 1;
+        }
+
+        println!("Starting trace at cycle {}", cycle);
+        let mut fn_entries: Vec<(u64, u32)> = Vec::new();
+        let mut music_init_hit = false;
+        let mut last_pcs: std::collections::VecDeque<(u64, u32)> = std::collections::VecDeque::new();
+
+        while cycle < end_cycle {
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                if pc >= 0x08000000 {
+                    last_pcs.push_back((cycle, pc));
+                    if last_pcs.len() > 200 { last_pcs.pop_front(); }
+
+                    let off = (pc as usize).wrapping_sub(0x08000000);
+                    if off + 2 <= gba.rom.len() {
+                        let h = u16::from_le_bytes([gba.rom[off], gba.rom[off+1]]);
+                        if (h >> 9) == 0b1011010 && (h & 0x100) != 0 {
+                            fn_entries.push((cycle, pc));
+                        }
+                    }
+
+                    if pc == 0x080156C4 { music_init_hit = true; println!("[MUSIC_INIT] cycle={}", cycle); }
+                    if pc == 0x080199AC { println!("[FULL_AUDIO_INIT] cycle={}", cycle); }
+                    if pc == 0x08019944 { println!("[RING_BUF_POP] cycle={}", cycle); }
+                }
+            }
+            gba.tick_one_cycle();
+            cycle += 1;
+        }
+
+        println!("\n=== All unique fn entries ({}-{}) ===", start_cycle, end_cycle);
+        let mut seen = std::collections::HashSet::new();
+        for (cyc, pc) in &fn_entries {
+            if seen.insert(*pc) {
+                println!("  cycle={} fn={:#010x}", cyc, pc);
+            }
+        }
+        if !music_init_hit {
+            println!("\n0x080156C4 NOT called in window");
+            println!("Last 40 unique PCs at end of window:");
+            let mut seen2 = std::collections::HashSet::new();
+            for (cyc, pc) in last_pcs.iter().rev() {
+                if seen2.insert(*pc) {
+                    println!("  cycle={} pc={:#010x}", cyc, pc);
+                    if seen2.len() >= 40 { break; }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_meteorain_ring_buf_monitor() {
+        // Monitor ring buffer head/tail values over time to see if they ever diverge.
+        // Ring buffer struct at IRAM[0x03001280]:
+        //   head at offset 0x4C = IRAM[0x030012CC]
+        //   tail at offset 0x50 = IRAM[0x030012D0]
+        // Also monitor calls to 0x08019944 (ring buf entry adder)
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut cycle: u64 = 0;
+        let max_cycles: u64 = 50_000_000;
+        let mut prev_head: u32 = 0xDEAD;
+        let mut prev_tail: u32 = 0xDEAD;
+        let mut ring_buf_changes = 0u32;
+
+        while cycle < max_cycles {
+            let head = u32::from_le_bytes(gba.iram[0x12CC..0x12D0].try_into().unwrap());
+            let tail = u32::from_le_bytes(gba.iram[0x12D0..0x12D4].try_into().unwrap());
+
+            if head != prev_head || tail != prev_tail {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("[RB_CHANGE] cycle={} PC={:#010x}: head={:#010x}->{:#010x} tail={:#010x}->{:#010x} empty={}",
+                    cycle, pc, prev_head, head, prev_tail, tail, head == tail);
+                prev_head = head;
+                prev_tail = tail;
+                ring_buf_changes += 1;
+                if ring_buf_changes >= 20 { break; }
+            }
+
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                if pc == 0x08019944 {
+                    println!("[RBP_CALL] cycle={} ring_buf_pop called", cycle);
+                }
+                if pc == 0x080199AC {
+                    println!("[FULL_INIT] cycle={} full audio init called", cycle);
+                }
+            }
+
+            gba.tick_one_cycle();
+            cycle += 1;
+        }
+
+        println!("Total ring buf changes: {} in {} cycles", ring_buf_changes, cycle);
+    }
+
+    #[test]
+    fn test_meteorain_module_table_caller() {
+        // Find if/when 0x08015FEC (module table iterator) is called in first 10M cycles.
+        // Also trace when any entry from the module table (fn ptrs) is called.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut cycle: u64 = 0;
+        let max_cycles: u64 = 10_000_000;
+
+        // Known module table fn pointers from 0x08031190-0x08031288
+        let module_fns: std::collections::HashSet<u32> = [
+            0x08015D60, 0x08015BE8, 0x08015514, 0x08015B68, 0x08015B24,
+            0x08015AFC, 0x08015ADC, 0x08015AB4, 0x08015A80, 0x08015A3C,
+            0x080159FC, 0x08015C28, 0x08015FE0, 0x08015954, 0x08015908,
+            0x080158C4, 0x08015844, 0x0801576C, 0x08015736, 0x08015D88,
+            0x08015714, 0x08015DDC, 0x080156F8, 0x080156C4, // "music" init
+            0x080154FC, 0x08015680, // "sound" init
+            0x0801565C, 0x08015618, 0x0801552C, 0x080154E4, 0x08016180,
+        ].iter().cloned().collect();
+
+        let mut first_module_fn_hit: Option<(u64, u32)> = None;
+        let mut music_hit = false;
+
+        while cycle < max_cycles {
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                if pc == 0x08015FEC {
+                    println!("[MODULE_ITER] 0x08015FEC called at cycle={}", cycle);
+                }
+                if module_fns.contains(&pc) {
+                    if first_module_fn_hit.is_none() {
+                        first_module_fn_hit = Some((cycle, pc));
+                    }
+                    println!("[MODULE_FN] cycle={} fn={:#010x}", cycle, pc);
+                }
+                if pc == 0x080156C4 { music_hit = true; }
+            }
+            gba.tick_one_cycle();
+            cycle += 1;
+        }
+
+        if first_module_fn_hit.is_none() {
+            println!("[RESULT] No module table functions called in {}M cycles", max_cycles/1_000_000);
+        }
+        if !music_hit {
+            println!("[RESULT] 0x080156C4 (music init) never called");
+        }
+    }
+
+    #[test]
+    fn test_meteorain_isr_timing() {
+        // Measure Timer1 ISR calls and their cycle cost during dark blue phase.
+        // ISR at 0x08019868, short path exits at 0x080198CA-0x080198D4, long path exits same.
+        // PC check: when we see PC=0x08019868, an ISR call is starting.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let mut dark_blue_active = false;
+        let mut last_pal0: u16 = 0xFFFF;
+        let mut isr_starts: Vec<u64> = Vec::new();
+        let mut isr_durations: Vec<u64> = Vec::new();
+        let mut isr_start_cycle: u64 = 0;
+        let mut in_isr = false;
+        let mut outer_iters: u64 = 0;
+        let mut dark_blue_start_cycle: u64 = 0;
+
+        for _ in 0..(30_000_000u64 * 4) {
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                if pal0 == 0x0800 && !dark_blue_active {
+                    dark_blue_active = true;
+                    dark_blue_start_cycle = gba.cycles;
+                    println!("Dark blue START cycle={}", gba.cycles);
+                } else if pal0 != 0x0800 && dark_blue_active {
+                    dark_blue_active = false;
+                    println!("Dark blue END cycle={}", gba.cycles);
+                    break;
+                }
+                last_pal0 = pal0;
+            }
+
+            if dark_blue_active && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+
+                // Detect outer iter at 0x08016FD2
+                if is_thumb && pc == 0x08016FD2 {
+                    outer_iters += 1;
+                }
+
+                // Detect ISR entry at 0x08019868
+                if is_thumb && pc == 0x08019868 {
+                    in_isr = true;
+                    isr_start_cycle = gba.cycles;
+                    if isr_starts.len() < 20 {
+                        isr_starts.push(gba.cycles);
+                    }
+                }
+
+                // Detect ISR exit (BX R0 at 0x080198D4)
+                if in_isr && is_thumb && pc == 0x080198D4 {
+                    let dur = gba.cycles - isr_start_cycle;
+                    isr_durations.push(dur);
+                    if isr_durations.len() <= 5 {
+                        println!("ISR call #{}: {} cycles, head_eq_tail={}",
+                            isr_durations.len(), dur,
+                            u32::from_le_bytes(gba.iram[0x12CC..0x12D0].try_into().unwrap()) ==
+                            u32::from_le_bytes(gba.iram[0x12D0..0x12D4].try_into().unwrap()));
+                    }
+                    in_isr = false;
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+
+        let total_dark = gba.cycles - dark_blue_start_cycle;
+        let avg_isr = if isr_durations.is_empty() { 0.0 } else {
+            isr_durations.iter().sum::<u64>() as f64 / isr_durations.len() as f64
+        };
+        println!("Outer iters: {}, ISR calls: {}, avg ISR cycles: {:.1}",
+            outer_iters, isr_durations.len(), avg_isr);
+        println!("Total dark blue cycles: {}", total_dark);
+        if outer_iters > 0 {
+            println!("Avg cycles/outer iter: {:.1}", total_dark as f64 / outer_iters as f64);
+        }
+        println!("ISR call rate: {:.4} per outer iter", isr_durations.len() as f64 / outer_iters.max(1) as f64);
     }
 }
