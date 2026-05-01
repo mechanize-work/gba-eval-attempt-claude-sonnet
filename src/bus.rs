@@ -69,16 +69,26 @@ impl Gba {
             0x06 => {
                 let off = (addr & 0x1FFFF) as usize;
                 let off = if off >= 0x18000 { off - 0x8000 } else { off };
-                // VRAM 8-bit write: only effective in OBJ area for certain modes
-                // In bitmap modes (3,4,5), 8-bit writes to BG area are ignored
-                // For simplicity, allow all writes (some games depend on this)
-                if off < self.vram.len() {
-                    // Only write if in OBJ tile area or in text/affine tile area
-                    // Actually GBATEK says: 8-bit writes to BG tile area are ignored in bitmap modes
-                    // We'll handle this simply
-                    self.vram[off] = val;
-                    if off + 1 < self.vram.len() { self.vram[off ^ 1] = val; } // write to both bytes
+                // 8-bit writes to VRAM: replicate byte to both bytes of halfword
+                // in BG tile areas; ignored in bitmap BG areas and OAM
+                let mode = self.dispcnt & 7;
+                let bg_end = if mode >= 3 { 0x14000 } else { 0x10000 };
+                if off < bg_end {
+                    // BG area: replicate byte
+                    let aligned = off & !1;
+                    if aligned + 1 < self.vram.len() {
+                        self.vram[aligned] = val;
+                        self.vram[aligned + 1] = val;
+                    }
+                } else if off >= 0x10000 {
+                    // OBJ tile area: replicate byte
+                    let aligned = off & !1;
+                    if aligned + 1 < self.vram.len() {
+                        self.vram[aligned] = val;
+                        self.vram[aligned + 1] = val;
+                    }
                 }
+                // else: bitmap mode BG area - 8-bit writes ignored
             }
             0x07 => {
                 // OAM: 8-bit writes are ignored
@@ -90,16 +100,52 @@ impl Gba {
 
     pub(crate) fn mem_write16(&mut self, addr: u32, val: u16) {
         let addr = addr & !1;
-        self.mem_write8(addr, val as u8);
-        self.mem_write8(addr + 1, (val >> 8) as u8);
+        let lo = val as u8;
+        let hi = (val >> 8) as u8;
+        match (addr & 0x0FFFFFFF) >> 24 {
+            0x02 => {
+                let off = (addr & 0x3FFFE) as usize;
+                self.wram[off] = lo; self.wram[off + 1] = hi;
+            }
+            0x03 => {
+                let off = (addr & 0x7FFE) as usize;
+                self.iram[off] = lo; self.iram[off + 1] = hi;
+            }
+            0x04 => self.io_write16(addr & 0x3FF, val),
+            0x05 => {
+                let off = (addr & 0x3FE) as usize;
+                self.palette[off] = lo; self.palette[off + 1] = hi;
+            }
+            0x06 => {
+                let off = (addr & 0x1FFFE) as usize;
+                let off = if off >= 0x18000 { off - 0x8000 } else { off };
+                if off + 1 < self.vram.len() {
+                    self.vram[off] = lo; self.vram[off + 1] = hi;
+                }
+            }
+            0x07 => {
+                let off = (addr & 0x3FE) as usize;
+                self.oam[off] = lo; self.oam[off + 1] = hi;
+            }
+            0x0E | 0x0F => {
+                let off = (addr & 0xFFFE) as usize;
+                self.sram[off] = lo; self.sram[off + 1] = hi;
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn mem_write32(&mut self, addr: u32, val: u32) {
         let addr = addr & !3;
-        self.mem_write8(addr, val as u8);
-        self.mem_write8(addr + 1, (val >> 8) as u8);
-        self.mem_write8(addr + 2, (val >> 16) as u8);
-        self.mem_write8(addr + 3, (val >> 24) as u8);
+        match (addr & 0x0FFFFFFF) >> 24 {
+            0x04 => {
+                self.io_write32(addr & 0x3FF, val);
+            }
+            _ => {
+                self.mem_write16(addr, val as u16);
+                self.mem_write16(addr + 2, (val >> 16) as u16);
+            }
+        }
     }
 
     // ===== I/O Register Read =====

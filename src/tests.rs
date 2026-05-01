@@ -158,4 +158,40 @@ mod tests {
         }
         println!("Wrote 30 frames to /tmp/my_frames/");
     }
+
+    #[test]
+    fn test_dma_trace() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        // Trace all DMA transfers in the first frame
+        let mut last_dma_ctrls = [0u16; 4];
+        for cycle in 0..280896u32 {
+            // Check for DMA enables
+            for ch in 0..4 {
+                let ctrl = gba.dma[ch].ctrl;
+                let was_enabled = last_dma_ctrls[ch] >> 15 != 0;
+                let now_enabled = ctrl >> 15 != 0;
+                if now_enabled && !was_enabled {
+                    let src = gba.dma[ch].src_raw;
+                    let dst = gba.dma[ch].dst_raw;
+                    let cnt = gba.dma[ch].cnt_raw;
+                    let timing = (ctrl >> 12) & 3;
+                    let width = if (ctrl >> 10) & 1 != 0 { 32 } else { 16 };
+                    println!("Cycle {:6}: DMA{} ENABLED src=0x{:08X} dst=0x{:08X} cnt={} timing={} width={}",
+                        cycle, ch, src, dst, cnt, timing, width);
+                    // Show first few source words
+                    let words = cnt.min(8) as u32;
+                    for i in 0..words {
+                        let addr = src.wrapping_add(i * (width/8));
+                        let val = if width == 32 { gba.mem_read32(addr) } else { gba.mem_read16(addr) as u32 };
+                        print!("  [+{}]=0x{:08X}", i, val);
+                    }
+                    println!();
+                }
+                last_dma_ctrls[ch] = ctrl;
+            }
+            gba.tick_one_cycle();
+        }
+        println!("Final palette[0..16]: {:?}", &gba.palette[0..16]);
+        println!("DISPCNT={:04X} BGCNT[2]={:04X}", gba.dispcnt, gba.bgcnt[2]);
+    }
 }
