@@ -22,17 +22,17 @@ impl Gba {
             0x05 | 0x06 => if width == 4 { 2 } else { 1 },     // Palette, VRAM (16-bit bus)
             0x08 | 0x09 => {                                    // ROM WS0
                 let n = 1 + WS_N[((wc >> 2) & 3) as usize];
-                let s = 1 + [2u32, 1][((wc >> 4) & 1) as usize];
+                let s = [2u32, 1][((wc >> 4) & 1) as usize];
                 if width == 4 { n + s } else { n }
             }
             0x0A | 0x0B => {                                    // ROM WS1
                 let n = 1 + WS_N[((wc >> 5) & 3) as usize];
-                let s = 1 + [4u32, 1][((wc >> 7) & 1) as usize];
+                let s = [4u32, 1][((wc >> 7) & 1) as usize];
                 if width == 4 { n + s } else { n }
             }
             0x0C | 0x0D => {                                    // ROM WS2
                 let n = 1 + WS_N[((wc >> 8) & 3) as usize];
-                let s = 1 + [8u32, 1][((wc >> 10) & 1) as usize];
+                let s = [8u32, 1][((wc >> 10) & 1) as usize];
                 if width == 4 { n + s } else { n }
             }
             0x0E | 0x0F => 1 + WS_N[(wc & 3) as usize],       // SRAM

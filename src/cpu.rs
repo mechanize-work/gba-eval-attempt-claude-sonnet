@@ -49,7 +49,8 @@ impl Gba {
         self.arm_execute(instr);
 
         if !self.branch_taken {
-            self.fetch_sequential = !self.rom_data_accessed;
+            let prefetch_on = (self.waitcnt >> 14) & 1 != 0;
+            self.fetch_sequential = if prefetch_on { true } else { !self.rom_data_accessed };
             self.regs[15] = self.regs[15].wrapping_add(4);
         } else {
             // GBATek: "B taken = 2S+1N" — extra S for the wasted decode-stage instruction
@@ -978,8 +979,8 @@ impl Gba {
         self.thumb_execute(instr);
 
         if !self.branch_taken {
-            // If current instruction accessed ROM data, bus ends at data addr → next fetch is N
-            self.fetch_sequential = !self.rom_data_accessed;
+            let prefetch_on = (self.waitcnt >> 14) & 1 != 0;
+            self.fetch_sequential = if prefetch_on { true } else { !self.rom_data_accessed };
             self.regs[15] = self.regs[15].wrapping_add(2);
         } else {
             // GBATek: "B taken = 2S+1N" — extra S for the wasted decode-stage instruction
