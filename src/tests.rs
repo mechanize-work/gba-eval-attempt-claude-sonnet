@@ -1818,6 +1818,7 @@ mod tests {
         let mut loop_exit_cycle = 0u64;
         let mut first_r5 = 0u32;
 
+        let mut halt_cycles = 0u64;
         for _ in 0..(30_000_000u64 * 3) {
             // Track palette[0]
             let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
@@ -1833,10 +1834,16 @@ mod tests {
                     println!("Loop iterations: {} in {} cycles = {:.1} cycles/iter",
                         iter_count, loop_exit_cycle - loop_entry_cycle,
                         (loop_exit_cycle - loop_entry_cycle) as f64 / iter_count as f64);
+                    println!("Halt cycles in dark blue: {} ({:.1}/iter)", halt_cycles,
+                        halt_cycles as f64 / iter_count as f64);
                     println!("Final R5={:08X}", gba.regs[5]);
                     break;
                 }
                 last_pal0 = pal0;
+            }
+
+            if dark_blue_active && gba.halted {
+                halt_cycles += 1;
             }
 
             // Count loop iterations
@@ -1846,7 +1853,8 @@ mod tests {
                     if iter_count == 0 {
                         loop_entry_cycle = gba.cycles;
                         first_r5 = gba.regs[5];
-                        println!("First R5={:08X} R7={:08X}", gba.regs[5], gba.regs[7]);
+                        println!("First R5={:08X} R7={:08X} WAITCNT=0x{:04X} MEMCNT=0x{:08X}",
+                            gba.regs[5], gba.regs[7], gba.waitcnt, gba.memcnt);
                     }
                     iter_count += 1;
                 }
