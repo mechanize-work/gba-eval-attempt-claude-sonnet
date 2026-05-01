@@ -131,6 +131,9 @@ pub(crate) struct Gba {
 
     // DMA active state
     pub dma_pending: u8,  // bitmask of DMA channels pending
+
+    // Branch taken flag: set by any instruction that modifies PC
+    pub branch_taken: bool,
 }
 
 #[derive(Clone)]
@@ -310,6 +313,7 @@ impl Gba {
             waitcnt: 0, postflg: 0, haltcnt: 0,
             cycles: 0, frame_cycles: 0,
             dma_pending: 0,
+            branch_taken: false,
         };
 
         // Load BIOS stub
@@ -388,6 +392,7 @@ impl Gba {
         self.waitcnt = 0; self.postflg = 0; self.haltcnt = 0;
         self.cycles = 0; self.frame_cycles = 0;
         self.dma_pending = 0;
+        self.branch_taken = false;
 
         // Boot from ROM
         self.regs[15] = 0x08000008;

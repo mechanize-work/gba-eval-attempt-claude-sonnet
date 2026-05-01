@@ -111,4 +111,51 @@ mod tests {
                 gba.dispcnt);
         }
     }
+
+    #[test]
+    fn test_swi_trace() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let mut swi_count = 0;
+        // Run first full frame cycle by cycle, tracing SWIs and DISPCNT
+        for _ in 0..280896u32 {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            // Check for SWI
+            let swi_num = if is_thumb {
+                let instr = gba.mem_read16(pc);
+                if instr >> 8 == 0xDF { Some((instr & 0xFF) as u32) } else { None }
+            } else {
+                let instr = gba.mem_read32(pc);
+                if instr >> 24 == 0xEF { Some(instr & 0xFFFFFF) } else { None }
+            };
+            if let Some(n) = swi_num {
+                let regs: Vec<String> = (0..4).map(|i| format!("r{}={:08X}", i, gba.regs[i])).collect();
+                println!("SWI {:3} at {:08X}: {}", n, pc, regs.join(" "));
+                swi_count += 1;
+            }
+            gba.tick_one_cycle();
+        }
+        println!("Total SWIs in frame 0: {}", swi_count);
+        println!("After frame 0: DISPCNT={:04X} BGCNT[0]={:04X}", gba.dispcnt, gba.bgcnt[0]);
+        println!("Palette[0..8]: {:?}", &gba.palette[0..16]);
+    }
+
+    #[test]
+    fn dump_frames_ppm() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        fs::create_dir_all("/tmp/my_frames").unwrap();
+        for i in 0..30 {
+            gba.run_frame();
+            let fb = &gba.framebuffer;
+            let mut data = format!("P6\n240 160\n255\n").into_bytes();
+            for &px in fb.iter() {
+                let r = (px & 0xFF) as u8;
+                let g = ((px >> 8) & 0xFF) as u8;
+                let b = ((px >> 16) & 0xFF) as u8;
+                data.push(r); data.push(g); data.push(b);
+            }
+            fs::write(format!("/tmp/my_frames/frame_{:05}.ppm", i), &data).unwrap();
+        }
+        println!("Wrote 30 frames to /tmp/my_frames/");
+    }
 }

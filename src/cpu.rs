@@ -33,10 +33,9 @@ impl Gba {
         // PC is 8 ahead: fetch at PC-8. During execute, PC = instr_addr+8.
         let pc = self.regs[15].wrapping_sub(8);
         let instr = self.mem_read32(pc);
-        let old_pc = self.regs[15];
+        self.branch_taken = false;
         self.arm_execute(instr);
-        // Advance only if instruction didn't modify PC (branch detection)
-        if self.regs[15] == old_pc {
+        if !self.branch_taken {
             self.regs[15] = self.regs[15].wrapping_add(4);
         }
     }
@@ -166,12 +165,14 @@ impl Gba {
             } else {
                 self.regs[15] = (val & !3).wrapping_add(8);
             }
+            self.branch_taken = true;
         } else {
             self.regs[n as usize] = val;
         }
     }
 
     fn arm_bx(&mut self, addr: u32) {
+        self.branch_taken = true;
         if addr & 1 != 0 {
             // Switch to Thumb
             self.cpsr |= CPSR_T;
@@ -527,6 +528,7 @@ impl Gba {
             if rd == 15 {
                 // If loading into PC, flush pipeline
                 self.regs[15] = (val & !3).wrapping_add(8);
+                self.branch_taken = true;
             }
         } else {
             let src = self.reg(rd);  // R15 = current PC + 12 in STR
@@ -584,6 +586,7 @@ impl Gba {
                     } else {
                         self.regs[i as usize] = val;
                         if i == 15 {
+                            self.branch_taken = true;
                             if s {
                                 // Load PC and CPSR from SPSR
                                 let spsr = self.get_spsr();
@@ -669,6 +672,7 @@ impl Gba {
         // Branch offset is relative to instr_addr+8, so target = regs[15] + offset
         let target = self.regs[15].wrapping_add(offset as u32);
         self.regs[15] = (target & !3).wrapping_add(8);
+        self.branch_taken = true;
     }
 
     // ===== Software Interrupt =====
@@ -681,8 +685,8 @@ impl Gba {
         self.cpsr = (self.cpsr & !0x3F) | MODE_SVC | CPSR_I;
         self.regs[13] = self.bank_svc[0];
         self.regs[14] = self.bank_svc[1];
-        // Jump to SWI vector (0x08) with pipeline offset
         self.regs[15] = 0x08u32.wrapping_add(8);
+        self.branch_taken = true;
     }
 
     fn arm_undefined(&mut self, _instr: u32) {
@@ -695,6 +699,7 @@ impl Gba {
         self.regs[13] = self.bank_und[0];
         self.regs[14] = self.bank_und[1];
         self.regs[15] = 0x04u32.wrapping_add(8);
+        self.branch_taken = true;
     }
 
     // ===== PSR Transfer =====
@@ -879,6 +884,7 @@ impl Gba {
         self.regs[13] = self.bank_irq[0];
         self.regs[14] = self.bank_irq[1];
         self.regs[15] = 0x18u32.wrapping_add(8);
+        self.branch_taken = true;
         self.halted = false;
     }
 
@@ -887,10 +893,9 @@ impl Gba {
         // PC is 4 ahead: fetch at PC-4. During execute, PC = instr_addr+4.
         let pc = self.regs[15].wrapping_sub(4);
         let instr = self.mem_read16(pc) as u32;
-        let old_pc = self.regs[15];
+        self.branch_taken = false;
         self.thumb_execute(instr);
-        // Advance only if instruction didn't modify PC
-        if self.regs[15] == old_pc {
+        if !self.branch_taken {
             self.regs[15] = self.regs[15].wrapping_add(2);
         }
     }
@@ -990,12 +995,11 @@ impl Gba {
                     }
                     0b11 => {
                         // Format 19 part 2: BL suffix
-                        // target = LR + (offset_lo << 1)
-                        // return addr = instr_addr + 2 = (regs[15]=instr_addr+4) - 2
                         let offset = (instr & 0x7FF) << 1;
                         let target = self.regs[14].wrapping_add(offset);
                         self.regs[14] = self.regs[15].wrapping_sub(2) | 1;
                         self.regs[15] = (target & !1).wrapping_add(4);
+                        self.branch_taken = true;
                     }
                     0b01 => {
                         // BLX offset (ARMv5, not in GBA)
@@ -1176,6 +1180,7 @@ impl Gba {
                 let result = self.reg(rd).wrapping_add(self.reg(rs));
                 if rd == 15 {
                     self.regs[15] = (result & !1).wrapping_add(4);
+                    self.branch_taken = true;
                 } else {
                     self.regs[rd as usize] = result;
                 }
@@ -1190,6 +1195,7 @@ impl Gba {
                 let val = self.reg(rs);
                 if rd == 15 {
                     self.regs[15] = (val & !1).wrapping_add(4);
+                    self.branch_taken = true;
                 } else {
                     self.regs[rd as usize] = val;
                 }
@@ -1200,7 +1206,7 @@ impl Gba {
                     // BLX: save return address
                     self.regs[14] = self.regs[15].wrapping_sub(2) | 1;
                 }
-                self.arm_bx(addr);
+                self.arm_bx(addr);  // arm_bx sets branch_taken
             }
             _ => unreachable!()
         }
@@ -1349,7 +1355,7 @@ impl Gba {
             if r {
                 let pc = self.mem_read32(sp & !3);
                 sp = sp.wrapping_add(4);
-                self.arm_bx(pc);
+                self.arm_bx(pc);  // arm_bx sets branch_taken
             }
             self.regs[13] = sp;
         } else {
@@ -1405,10 +1411,9 @@ impl Gba {
         let cond = ((instr >> 8) & 0xF) as u8;
         if !self.check_cond(cond) { return; }
         let offset = ((instr & 0xFF) as i8 as i32) * 2;
-        // During execute: regs[15] = instr_addr + 4
-        // target = (instr_addr + 4) + offset = regs[15] + offset
         let target = self.regs[15].wrapping_add(offset as u32);
         self.regs[15] = (target & !1).wrapping_add(4);
+        self.branch_taken = true;
     }
 
     fn thumb_swi(&mut self, _instr: u32) {
@@ -1421,15 +1426,15 @@ impl Gba {
         self.regs[13] = self.bank_svc[0];
         self.regs[14] = self.bank_svc[1];
         self.regs[15] = 0x08u32.wrapping_add(8);
+        self.branch_taken = true;
     }
 
     fn thumb_branch(&mut self, instr: u32) {
         // Unconditional branch, 11-bit signed offset
-        // During execute: regs[15] = instr_addr + 4
-        // target = (instr_addr + 4) + offset*2 = regs[15] + offset
         let offset = ((instr & 0x7FF) as i32) << 21 >> 20;  // sign extend and *2
         let target = self.regs[15].wrapping_add(offset as u32);
         self.regs[15] = (target & !1).wrapping_add(4);
+        self.branch_taken = true;
     }
 }
 
