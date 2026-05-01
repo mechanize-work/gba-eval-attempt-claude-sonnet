@@ -523,8 +523,8 @@ impl Gba {
             }
         }
 
-        // Service interrupts after CPU step
-        if self.ime != 0 && (self.if_ & self.ie) != 0 && !self.halted {
+        // Service interrupts after CPU step (only bit 0 of IME matters)
+        if (self.ime & 1) != 0 && (self.if_ & self.ie) != 0 && !self.halted {
             self.cpu_do_irq();
         }
 

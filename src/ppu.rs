@@ -152,8 +152,8 @@ impl Gba {
         let cnt = self.bgcnt[bg];
         let priority = cnt & 3;
         let tile_base = (((cnt >> 2) & 3) as usize) * 0x4000;
-        let mosaic = (cnt >> 6) & 1 != 0;
-        let color256 = (cnt >> 7) & 1 != 0;
+        let _mosaic = (cnt >> 4) & 1 != 0;
+        let color256 = (cnt >> 5) & 1 != 0;
         let map_base = (((cnt >> 8) & 0x1F) as usize) * 0x800;
         let screen_size = (cnt >> 14) & 3;
 

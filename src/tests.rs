@@ -31,14 +31,15 @@ mod tests {
             let mut colors: Vec<u32> = unique.iter().copied().collect();
             colors.sort();
             if colors.len() <= 5 {
-                println!("Frame {:2}: unique={} dispcnt=0x{:04X} pc=0x{:08X} colors={:?}", 
-                    i, colors.len(), gba.dispcnt, 
+                println!("Frame {:2}: unique={} dispcnt=0x{:04X} pc=0x{:08X} colors={:?}",
+                    i, colors.len(), gba.dispcnt,
                     gba.regs[15].wrapping_sub(if (gba.cpsr & 0x20) != 0 { 4 } else { 8 }),
                     colors.iter().map(|c| format!("#{:06X}", c)).collect::<Vec<_>>());
             } else {
-                println!("Frame {:2}: unique={} dispcnt=0x{:04X} pc=0x{:08X}",
+                println!("Frame {:2}: unique={} dispcnt=0x{:04X} pc=0x{:08X} bg2cnt={:04X} vofs={} hofs={}",
                     i, colors.len(), gba.dispcnt,
-                    gba.regs[15].wrapping_sub(if (gba.cpsr & 0x20) != 0 { 4 } else { 8 }));
+                    gba.regs[15].wrapping_sub(if (gba.cpsr & 0x20) != 0 { 4 } else { 8 }),
+                    gba.bgcnt[2], gba.bgvofs[2], gba.bghofs[2]);
             }
         }
     }
@@ -262,6 +263,64 @@ mod tests {
         println!("0x03007FFC = {:08X}", gba.mem_read32(0x03007FFC));
         println!("0x03FFFFF8 = {:08X}", gba.mem_read32(0x03FFFFF8));
         println!("palette[0..8]: {:?}", &gba.palette[0..8]);
+    }
+
+    #[test]
+    fn test_multiframe_irq() {
+        let mut gba = make_gba("/task/dev-roms/anguna.gba");
+        let mut last_if = 0u16;
+        let mut last_halted = false;
+        let mut last_fffff8 = 0u16;
+        let mut last_pc = 0u32;
+        let mut last_ime = 0u32;
+
+        // Run 3 frames worth of cycles
+        for cycle in 0..840000u32 {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            let fffff8 = gba.mem_read16(0x03FFFFF8);
+
+            // Track PC jumps to BIOS IRQ vector (0x18)
+            if pc == 0x18 && last_pc != 0x18 {
+                println!("Cycle {:7}: IRQ TAKEN -> BIOS 0x18, IF={:04X} IE={:04X} IME={:08X} CPSR={:08X}",
+                    cycle, gba.if_, gba.ie, gba.ime, gba.cpsr);
+            }
+
+            // Track IF changes
+            if gba.if_ != last_if {
+                println!("Cycle {:7}: IF {:04X} -> {:04X}, halted={}, DISPSTAT={:04X}",
+                    cycle, last_if, gba.if_, gba.halted, gba.dispstat);
+                last_if = gba.if_;
+            }
+
+            // Track halt/wake
+            if gba.halted != last_halted {
+                println!("Cycle {:7}: CPU {} PC=0x{:08X} CPSR={:08X} IF={:04X} IE={:04X} 0x3FFFFF8={:04X}",
+                    cycle,
+                    if gba.halted { "HALTED" } else { "WOKE" },
+                    pc, gba.cpsr, gba.if_, gba.ie, fffff8);
+                last_halted = gba.halted;
+            }
+
+            // Track 0x03FFFFF8 changes
+            if fffff8 != last_fffff8 {
+                println!("Cycle {:7}: 0x3FFFFF8 {:04X} -> {:04X}", cycle, last_fffff8, fffff8);
+                last_fffff8 = fffff8;
+            }
+
+            // Track IME changes
+            if gba.ime != last_ime {
+                println!("Cycle {:7}: IME {:08X} -> {:08X} PC=0x{:08X}",
+                    cycle, last_ime, gba.ime, pc);
+                last_ime = gba.ime;
+            }
+
+            last_pc = pc;
+            gba.tick_one_cycle();
+        }
+        let fffff8 = gba.mem_read16(0x03FFFFF8);
+        println!("After 3 frames: halted={} IF={:04X} IE={:04X} DISPSTAT={:04X} 0x3FFFFF8={:04X} IME={:08X}",
+            gba.halted, gba.if_, gba.ie, gba.dispstat, fffff8, gba.ime);
     }
 
     #[test]
