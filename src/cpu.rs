@@ -1279,11 +1279,11 @@ impl Gba {
     }
 
     fn thumb_load_store(&mut self, instr: u32) {
-        // Format 7 or 8
-        let bit10 = (instr >> 10) & 1;
+        // Format 7 or 8: distinguished by bit 9 (0=Format7, 1=Format8)
+        let bit9 = (instr >> 9) & 1;
         let bit11 = (instr >> 11) & 1;
 
-        if bit10 == 0 {
+        if bit9 == 0 {
             // Format 7: load/store with register offset
             let l = bit11 != 0;
             let b = (instr >> 10) & 1 != 0;
