@@ -3067,4 +3067,123 @@ mod tests {
         }
         println!("Total VBlank ISRs traced: {}", vblank_irq_count);
     }
+
+    #[test]
+    fn test_meteorain_init_fn_trace() {
+        // Check if 0x08019944 (the key audio init function) is ever called,
+        // and if so whether it calls 0x080198E0 or skips it via BEQ at 0x0801995A.
+        // Also trace 0x08015680 (its caller) and 0x080156C4 (another caller chain).
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut cycle: u64 = 0;
+        let max_cycles: u64 = 50_000_000;
+
+        let mut fn_19944_hits: Vec<(u64, u32)> = Vec::new(); // (cycle, R0)
+        let mut fn_19980_hits: Vec<(u64, u32)> = Vec::new(); // BEQ taken (skips 080198E0)
+        let mut fn_198e0_hits: Vec<(u64,)> = Vec::new();     // BL to 080198E0 reached
+        let mut fn_15680_hits: Vec<(u64,)> = Vec::new();
+        let mut fn_156c4_hits: Vec<(u64,)> = Vec::new();
+
+        while cycle < max_cycles {
+            let pc = gba.regs[15].wrapping_sub(if (gba.cpsr & 0x20) != 0 { 4 } else { 8 });
+
+            match pc {
+                0x08019944 => {
+                    fn_19944_hits.push((cycle, gba.regs[0]));
+                    if fn_19944_hits.len() <= 5 {
+                        println!("[INIT_FN] cycle={} PC=0x08019944 R0={:#010x} R1={:#010x}", cycle, gba.regs[0], gba.regs[1]);
+                    }
+                }
+                0x08019980 => {
+                    // BEQ target - 0x080198E0 was skipped
+                    fn_19980_hits.push((cycle, gba.regs[0]));
+                    if fn_19980_hits.len() <= 5 {
+                        println!("[BEQ_TAKEN] cycle={} PC=0x08019980 R0={:#010x}", cycle, gba.regs[0]);
+                    }
+                }
+                0x080198e0 => {
+                    fn_198e0_hits.push((cycle,));
+                    if fn_198e0_hits.len() <= 5 {
+                        println!("[AUDIO_SCHED] cycle={} PC=0x080198E0", cycle);
+                    }
+                }
+                0x08015680 => {
+                    fn_15680_hits.push((cycle,));
+                    if fn_15680_hits.len() <= 3 {
+                        println!("[CALLER_A] cycle={} PC=0x08015680", cycle);
+                    }
+                }
+                0x080156c4 => {
+                    fn_156c4_hits.push((cycle,));
+                    if fn_156c4_hits.len() <= 3 {
+                        println!("[CALLER_B] cycle={} PC=0x080156C4", cycle);
+                    }
+                }
+                // Trace the BL to 0x0801704A at 0x080199DA - print IRAM[0x0300111C] (R1 value)
+                0x080199da => {
+                    // R1 = IRAM[0x0300111C] (loaded from [R7, #0x1c] where R7 = 0x03001100)
+                    let iram_111c = gba.regs[1];  // R1 at this PC
+                    // Read the pointed-to value
+                    let ptr_val = if iram_111c >= 0x02000000 && iram_111c < 0x04000000 {
+                        let iram_off = (iram_111c & 0x7FFF) as usize;
+                        let iram_val = if iram_off + 4 <= gba.iram.len() {
+                            u32::from_le_bytes(gba.iram[iram_off..iram_off+4].try_into().unwrap())
+                        } else { 0xDEAD };
+                        iram_val
+                    } else {
+                        0xDEAD
+                    };
+                    println!("[BNE_CHECK] cycle={} R1(ptr)={:#010x} *R1={:#010x}", cycle, iram_111c, ptr_val);
+                }
+                // Trace the BNE decision at 0x080199E2
+                0x080199e2 => {
+                    println!("[BNE_DECISION] cycle={} R6(result)={:#010x} -> {}",
+                        cycle, gba.regs[6],
+                        if gba.regs[6] != 0 { "SKIP 0x08019944" } else { "CALL 0x08019944" });
+                }
+                _ => {}
+            }
+
+            gba.tick_one_cycle();
+            cycle += 1;
+        }
+
+        println!("\n=== Summary after {} cycles ===", max_cycles);
+        println!("0x08015680 (caller A) hits: {}", fn_15680_hits.len());
+        println!("0x080156C4 (caller B) hits: {}", fn_156c4_hits.len());
+        println!("0x08019944 (key init fn) hits: {}", fn_19944_hits.len());
+        println!("0x08019980 (BEQ taken = skip 080198E0) hits: {}", fn_19980_hits.len());
+        println!("0x080198E0 (audio scheduler) hits: {}", fn_198e0_hits.len());
+    }
+
+    #[test]
+    fn test_meteorain_struct84_writer() {
+        // Find what code actually writes struct+84 (IRAM[0x030012D4]) = 0x080312A4
+        // The ring_buf_init test found this at cycle 3958794.
+        // We need to identify the PC that does this write.
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut cycle: u64 = 0;
+        let max_cycles: u64 = 10_000_000;
+        let mut prev_d4: u32 = 0;
+
+        while cycle < max_cycles {
+            // Check IRAM[0x030012D4] for changes (byte-level)
+            // iram offset = 0x030012D4 - 0x03000000 = 0x12D4
+            let cur_d4 = u32::from_le_bytes(gba.iram[0x12D4..0x12D8].try_into().unwrap());
+            if cur_d4 != prev_d4 {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("[STRUCT84] cycle={} PC={:#010x}: [0x030012D4] {:08X}->{:08X}", cycle, pc, prev_d4, cur_d4);
+                prev_d4 = cur_d4;
+            }
+
+            if gba.cpu_cycles_remaining == 0 {
+                gba.tick_one_cycle();
+            } else {
+                gba.tick_one_cycle();
+            }
+            cycle += 1;
+        }
+    }
 }
