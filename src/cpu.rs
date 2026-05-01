@@ -43,6 +43,7 @@ impl Gba {
         self.stall_cycles += fetch_cyc;
 
         self.insn_has_icycles = false;
+        self.rom_data_accessed = false;
         let instr = self.mem_read32(pc);
         self.branch_taken = false;
         self.arm_execute(instr);
@@ -63,7 +64,7 @@ impl Gba {
         }
 
         if !self.branch_taken {
-            self.fetch_sequential = true;
+            self.fetch_sequential = !self.rom_data_accessed;
             self.regs[15] = self.regs[15].wrapping_add(4);
         } else {
             // GBATek: "B taken = 2S+1N" — extra S for the wasted decode-stage instruction
@@ -539,6 +540,7 @@ impl Gba {
             };
             self.stall_cycles += 1; // 1I internal cycle
             self.insn_has_icycles = true;
+            if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
             self.regs[rd as usize] = val;
         } else {
             // STRH (sh=1)
@@ -593,6 +595,7 @@ impl Gba {
             };
             self.stall_cycles += 1; // 1I internal cycle
             self.insn_has_icycles = true;
+            if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
             self.regs[rd as usize] = val;
             if rd == 15 {
                 // If loading into PC, flush pipeline
@@ -685,6 +688,7 @@ impl Gba {
             }
             self.stall_cycles += 1; // 1I
             self.insn_has_icycles = true;
+            if (start_addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
         } else {
             // STM: (n-1)S + 2N cycles
             let mut seq = false;
@@ -983,6 +987,7 @@ impl Gba {
         self.stall_cycles += fetch_cyc;
 
         self.insn_has_icycles = false;
+        self.rom_data_accessed = false;
         let instr = self.mem_read16(pc) as u32;
         self.branch_taken = false;
         self.thumb_execute(instr);
@@ -1003,7 +1008,8 @@ impl Gba {
         }
 
         if !self.branch_taken {
-            self.fetch_sequential = true;
+            // If current instruction accessed ROM data, bus ends at data addr → next fetch is N
+            self.fetch_sequential = !self.rom_data_accessed;
             self.regs[15] = self.regs[15].wrapping_add(2);
         } else {
             // GBATek: "B taken = 2S+1N" — extra S for the wasted decode-stage instruction
@@ -1345,6 +1351,7 @@ impl Gba {
         let addr = pc.wrapping_add(offset);
         self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + 1; // +1I
         self.insn_has_icycles = true;
+        if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
         self.regs[rd as usize] = self.mem_read32(addr);
     }
 
@@ -1365,11 +1372,13 @@ impl Gba {
                 if b {
                     self.stall_cycles += self.mem_cycles_n(addr, 1) + 1;
                     self.insn_has_icycles = true;
+                    if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
                     let val = self.mem_read8(addr) as u32;
                     self.regs[rd as usize] = val;
                 } else {
                     self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + 1;
                     self.insn_has_icycles = true;
+                    if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
                     let val = self.mem_read32_rotate(addr);
                     self.regs[rd as usize] = val;
                 }
@@ -1398,21 +1407,25 @@ impl Gba {
                 // LDRSB
                 self.stall_cycles += self.mem_cycles_n(addr, 1) + 1;
                 self.insn_has_icycles = true;
+                if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
                 self.regs[rd as usize] = self.mem_read8(addr) as i8 as i32 as u32;
             } else if !s && h {
                 // LDRH
                 self.stall_cycles += self.mem_cycles_n(addr & !1, 2) + 1;
                 self.insn_has_icycles = true;
+                if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
                 self.regs[rd as usize] = self.mem_read16(addr & !1) as u32;
             } else {
                 // LDRSH
                 if addr & 1 != 0 {
                     self.stall_cycles += self.mem_cycles_n(addr, 1) + 1;
                     self.insn_has_icycles = true;
+                    if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
                     self.regs[rd as usize] = self.mem_read8(addr) as i8 as i32 as u32;
                 } else {
                     self.stall_cycles += self.mem_cycles_n(addr & !1, 2) + 1;
                     self.insn_has_icycles = true;
+                    if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
                     self.regs[rd as usize] = self.mem_read16(addr & !1) as i16 as i32 as u32;
                 }
             }
@@ -1435,10 +1448,12 @@ impl Gba {
             if b {
                 self.stall_cycles += self.mem_cycles_n(addr, 1) + 1;
                 self.insn_has_icycles = true;
+                if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
                 self.regs[rd as usize] = self.mem_read8(addr) as u32;
             } else {
                 self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + 1;
                 self.insn_has_icycles = true;
+                if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
                 self.regs[rd as usize] = self.mem_read32_rotate(addr);
             }
         } else {
@@ -1463,6 +1478,7 @@ impl Gba {
         if l {
             self.stall_cycles += self.mem_cycles_n(addr & !1, 2) + 1;
             self.insn_has_icycles = true;
+            if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
             self.regs[rd as usize] = self.mem_read16(addr & !1) as u32;
         } else {
             self.stall_cycles += self.write_cycles_n(addr & !1, 2);
@@ -1480,6 +1496,7 @@ impl Gba {
         if l {
             self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + 1;
             self.insn_has_icycles = true;
+            if (addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
             self.regs[rd as usize] = self.mem_read32_rotate(addr);
         } else {
             self.stall_cycles += self.write_cycles_n(addr & !3, 4);
@@ -1570,6 +1587,7 @@ impl Gba {
         let mut addr = self.regs[rb as usize];
 
         if l {
+            let base_addr = addr;
             let mut seq = false;
             for i in 0..8u32 {
                 if (rlist >> i) & 1 != 0 {
@@ -1582,6 +1600,7 @@ impl Gba {
             }
             self.stall_cycles += 1; // 1I
             self.insn_has_icycles = true;
+            if (base_addr >> 24) >= 0x08 { self.rom_data_accessed = true; }
         } else {
             let mut seq = false;
             for i in 0..8u32 {

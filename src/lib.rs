@@ -141,6 +141,7 @@ pub(crate) struct Gba {
     pub cpu_cycles_remaining: i32,  // cycles CPU is stalled (waiting for memory)
     pub fetch_sequential: bool,     // true if last code fetch was sequential (no branch)
     pub insn_has_icycles: bool,     // set by handlers that add 1I; used for Prefetch Disable Bug
+    pub rom_data_accessed: bool,    // set when current insn reads/writes ROM data; next fetch is N
 }
 
 #[derive(Clone)]
@@ -326,6 +327,7 @@ impl Gba {
             cpu_cycles_remaining: 0,
             fetch_sequential: false,
             insn_has_icycles: false,
+            rom_data_accessed: false,
         };
 
         // Load BIOS stub
