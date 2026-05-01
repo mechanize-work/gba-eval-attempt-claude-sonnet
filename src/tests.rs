@@ -1807,6 +1807,88 @@ mod tests {
     }
 
     #[test]
+    fn test_meteorain_search_iters() {
+        // Count loop iterations during dark blue phase to verify iteration count
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+
+        let mut last_pal0: u16 = 0xFFFF;
+        let mut dark_blue_active = false;
+        let mut iter_count = 0u64;
+        let mut loop_entry_cycle = 0u64;
+        let mut loop_exit_cycle = 0u64;
+        let mut first_r5 = 0u32;
+
+        for _ in 0..(30_000_000u64 * 3) {
+            // Track palette[0]
+            let pal0 = (gba.palette[0] as u16) | ((gba.palette[1] as u16) << 8);
+            if pal0 != last_pal0 {
+                if pal0 == 0x0800 && !dark_blue_active {
+                    dark_blue_active = true;
+                    println!("Dark blue START at cycle={} frame={}",
+                        gba.cycles, gba.cycles/280896);
+                } else if pal0 != 0x0800 && dark_blue_active {
+                    dark_blue_active = false;
+                    loop_exit_cycle = gba.cycles;
+                    println!("Dark blue END at cycle={} frame={}", gba.cycles, gba.cycles/280896);
+                    println!("Loop iterations: {} in {} cycles = {:.1} cycles/iter",
+                        iter_count, loop_exit_cycle - loop_entry_cycle,
+                        (loop_exit_cycle - loop_entry_cycle) as f64 / iter_count as f64);
+                    println!("Final R5={:08X}", gba.regs[5]);
+                    break;
+                }
+                last_pal0 = pal0;
+            }
+
+            // Count loop iterations
+            if dark_blue_active && gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                if is_thumb && gba.regs[15].wrapping_sub(4) == 0x08016FD2 {
+                    if iter_count == 0 {
+                        loop_entry_cycle = gba.cycles;
+                        first_r5 = gba.regs[5];
+                        println!("First R5={:08X} R7={:08X}", gba.regs[5], gba.regs[7]);
+                    }
+                    iter_count += 1;
+                }
+            }
+
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_meteorain_ldr_addr() {
+        // Trace what address LDR at 08016FE4 is loading from
+        let mut gba = make_gba("/task/dev-roms/meteorain.gba");
+        let target = 4_000_000u64;
+        while (gba.cycles as u64) < target {
+            gba.tick_one_cycle();
+        }
+
+        let mut count = 0;
+        for _ in 0..200_000 {
+            if gba.cpu_cycles_remaining == 0 && !gba.halted {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                if is_thumb {
+                    let pc = gba.regs[15].wrapping_sub(4);
+                    if pc == 0x08016FD2 || pc == 0x08016FE4 {
+                        if count < 5 {
+                            let r2 = gba.regs[2];
+                            let r5 = gba.regs[5];
+                            let r7 = gba.regs[7];
+                            println!("PC={:08X}: R2={:08X} R5={:08X} R7={:08X} cycle={}",
+                                pc, r2, r5, r7, gba.cycles);
+                        }
+                        count += 1;
+                        if count >= 10 { break; }
+                    }
+                }
+            }
+            gba.tick_one_cycle();
+        }
+    }
+
+    #[test]
     fn test_meteorain_loop_disasm() {
         // Read and print ROM bytes at loop addresses for manual disassembly
         let gba = make_gba("/task/dev-roms/meteorain.gba");
