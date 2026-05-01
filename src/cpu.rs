@@ -30,11 +30,15 @@ impl Gba {
 
     // ===== ARM mode =====
     fn arm_step(&mut self) {
-        // PC is 8 ahead: fetch at PC-8
+        // PC is 8 ahead: fetch at PC-8. During execute, PC = instr_addr+8.
         let pc = self.regs[15].wrapping_sub(8);
         let instr = self.mem_read32(pc);
-        self.regs[15] = self.regs[15].wrapping_add(4);
+        let old_pc = self.regs[15];
         self.arm_execute(instr);
+        // Advance only if instruction didn't modify PC (branch detection)
+        if self.regs[15] == old_pc {
+            self.regs[15] = self.regs[15].wrapping_add(4);
+        }
     }
 
     fn arm_execute(&mut self, instr: u32) {
@@ -657,38 +661,20 @@ impl Gba {
         let offset = (offset << 6) >> 6;  // sign extend from bit 25
 
         if l {
-            // BL: save return address in LR
+            // BL: LR = instruction after BL = instr_addr + 4 = regs[15] - 4
             self.regs[14] = self.regs[15].wrapping_sub(4);
         }
 
-        let target = self.regs[15].wrapping_sub(8)  // current PC
-            .wrapping_add(8)  // pipeline
-            .wrapping_add(offset as u32);  // branch offset (already accounts for pipeline since encoded as relative to PC+8)
-
-        // Actually: target = PC + 8 + offset (where PC is already ahead by 8)
-        // But we have regs[15] = current_instr + 8
-        // So target = regs[15] + offset... wait let me reconsider
-
-        // The branch offset is: target - (current_instr + 8)
-        // And we want to set PC such that next fetch is from target
-        // regs[15] should be target + 8
-        // target = regs[15] (before this instruction advanced) - 4 (the advance we did) + offset...
-
-        // Correction: at this point, regs[15] = current_instr + 8 + 4 (we advanced by 4 at start)
-        // So current_instr = regs[15] - 12
-        // target = current_instr + 8 + offset = regs[15] - 12 + 8 + offset = regs[15] - 4 + offset
-
-        let pc = self.regs[15].wrapping_sub(4);  // regs[15] after the advance we did in arm_step
-        let target = pc.wrapping_add(offset as u32);
+        // During execute: regs[15] = instr_addr + 8
+        // Branch offset is relative to instr_addr+8, so target = regs[15] + offset
+        let target = self.regs[15].wrapping_add(offset as u32);
         self.regs[15] = (target & !3).wrapping_add(8);
     }
 
     // ===== Software Interrupt =====
     fn arm_swi(&mut self, _instr: u32) {
-        // LR_svc = address of instruction after SWI = A+4
-        // At this point regs[15] = A+12 (after arm_step advance)
-        // So A+4 = regs[15] - 8
-        self.bank_svc[1] = self.regs[15].wrapping_sub(8);
+        // LR_svc = instruction after SWI = instr_addr+4 = (regs[15]=instr_addr+8) - 4
+        self.bank_svc[1] = self.regs[15].wrapping_sub(4);
         self.spsr_svc = self.cpsr;
         let old_mode = self.cpsr & 0x1F;
         self.save_banked(old_mode);
@@ -700,8 +686,8 @@ impl Gba {
     }
 
     fn arm_undefined(&mut self, _instr: u32) {
-        // LR_und = address of undefined instruction + 4
-        self.bank_und[1] = self.regs[15].wrapping_sub(8).wrapping_add(4);
+        // LR_und = instr_addr+4 = (regs[15]=instr_addr+8) - 4
+        self.bank_und[1] = self.regs[15].wrapping_sub(4);
         self.spsr_und = self.cpsr;
         let old_mode = self.cpsr & 0x1F;
         self.save_banked(old_mode);
@@ -898,10 +884,15 @@ impl Gba {
 
     // ===== THUMB MODE =====
     fn thumb_step(&mut self) {
+        // PC is 4 ahead: fetch at PC-4. During execute, PC = instr_addr+4.
         let pc = self.regs[15].wrapping_sub(4);
         let instr = self.mem_read16(pc) as u32;
-        self.regs[15] = self.regs[15].wrapping_add(2);
+        let old_pc = self.regs[15];
         self.thumb_execute(instr);
+        // Advance only if instruction didn't modify PC
+        if self.regs[15] == old_pc {
+            self.regs[15] = self.regs[15].wrapping_add(2);
+        }
     }
 
     fn thumb_execute(&mut self, instr: u32) {
@@ -991,19 +982,19 @@ impl Gba {
                 match op11 {
                     0b00 => self.thumb_branch(instr),  // Format 18: Unconditional branch
                     0b10 => {
-                        // Format 19 part 1: BL prefix (set LR)
-                        // LR = (instr_addr + 4) + SignExt(offset_hi) << 12
-                        // = (regs[15] - 2) + SignExt(offset_hi) << 12
+                        // Format 19 part 1: BL/BLX prefix (set LR)
+                        // LR = (instr_addr + 4) + SignExt(offset_hi << 12)
+                        // During execute: regs[15] = instr_addr + 4
                         let offset = ((instr & 0x7FF) as i32) << 21 >> 21;
-                        self.regs[14] = self.regs[15].wrapping_sub(2).wrapping_add((offset << 12) as u32);
+                        self.regs[14] = self.regs[15].wrapping_add((offset << 12) as u32);
                     }
                     0b11 => {
                         // Format 19 part 2: BL suffix
-                        // target = LR + offset_lo << 1
-                        // return addr = instr_addr + 2 = regs[15] - 4, set LR = (return_addr) | 1
+                        // target = LR + (offset_lo << 1)
+                        // return addr = instr_addr + 2 = (regs[15]=instr_addr+4) - 2
                         let offset = (instr & 0x7FF) << 1;
                         let target = self.regs[14].wrapping_add(offset);
-                        self.regs[14] = self.regs[15].wrapping_sub(4) | 1;
+                        self.regs[14] = self.regs[15].wrapping_sub(2) | 1;
                         self.regs[15] = (target & !1).wrapping_add(4);
                     }
                     0b01 => {
@@ -1217,11 +1208,10 @@ impl Gba {
 
     fn thumb_pc_rel_load(&mut self, instr: u32) {
         // Format 6: PC-relative load
-        // PC = (instr_addr + 4) & !2 = word-aligned
-        // = (regs[15] - 2) & !3
+        // During execute: regs[15] = instr_addr + 4. Word-aligned.
         let rd = (instr >> 8) & 0x7;
         let offset = (instr & 0xFF) << 2;
-        let pc = self.regs[15].wrapping_sub(2) & !3;
+        let pc = self.regs[15] & !3;
         self.regs[rd as usize] = self.mem_read32(pc.wrapping_add(offset));
     }
 
@@ -1328,8 +1318,8 @@ impl Gba {
         let sp = (instr >> 11) & 1 != 0;
         let rd = (instr >> 8) & 0x7;
         let offset = (instr & 0xFF) << 2;
-        // PC for this is (instr_addr+4) word-aligned = (regs[15]-2) & !3
-        let base = if sp { self.regs[13] } else { (self.regs[15].wrapping_sub(2)) & !3 };
+        // During execute: regs[15] = instr_addr+4, word-aligned for PC case
+        let base = if sp { self.regs[13] } else { self.regs[15] & !3 };
         self.regs[rd as usize] = base.wrapping_add(offset);
     }
 
@@ -1415,16 +1405,15 @@ impl Gba {
         let cond = ((instr >> 8) & 0xF) as u8;
         if !self.check_cond(cond) { return; }
         let offset = ((instr & 0xFF) as i8 as i32) * 2;
-        // regs[15] after thumb_step = instr_addr + 6
-        // target = (instr_addr + 4) + offset = (regs[15] - 2) + offset
-        let target = self.regs[15].wrapping_sub(2).wrapping_add(offset as u32);
+        // During execute: regs[15] = instr_addr + 4
+        // target = (instr_addr + 4) + offset = regs[15] + offset
+        let target = self.regs[15].wrapping_add(offset as u32);
         self.regs[15] = (target & !1).wrapping_add(4);
     }
 
     fn thumb_swi(&mut self, _instr: u32) {
-        // LR_svc = address of instruction after SWI = B+2
-        // After thumb_step: regs[15] = B+6. B+2 = regs[15]-4.
-        self.bank_svc[1] = self.regs[15].wrapping_sub(4);
+        // LR_svc = instruction after SWI = instr_addr+2 = (regs[15]=instr_addr+4) - 2
+        self.bank_svc[1] = self.regs[15].wrapping_sub(2);
         self.spsr_svc = self.cpsr;
         self.save_banked(self.cpsr & 0x1F);
         self.cpsr = (self.cpsr & !0x3F) | MODE_SVC | CPSR_I;
@@ -1436,9 +1425,10 @@ impl Gba {
 
     fn thumb_branch(&mut self, instr: u32) {
         // Unconditional branch, 11-bit signed offset
-        // target = (instr_addr + 4) + offset*2 = (regs[15]-2) + offset*2
+        // During execute: regs[15] = instr_addr + 4
+        // target = (instr_addr + 4) + offset*2 = regs[15] + offset
         let offset = ((instr & 0x7FF) as i32) << 21 >> 20;  // sign extend and *2
-        let target = self.regs[15].wrapping_sub(2).wrapping_add(offset as u32);
+        let target = self.regs[15].wrapping_add(offset as u32);
         self.regs[15] = (target & !1).wrapping_add(4);
     }
 }
