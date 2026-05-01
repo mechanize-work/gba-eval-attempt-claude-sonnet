@@ -264,6 +264,19 @@ impl Gba {
 
     // ===== I/O Register Write =====
     pub(crate) fn io_write8(&mut self, offset: u32, val: u8) {
+        // Special-case byte-only registers
+        match offset {
+            0x301 => {
+                // HALTCNT
+                if val & 0x80 == 0 {
+                    self.halted = true;
+                } else {
+                    self.stopped = true;
+                }
+                return;
+            }
+            _ => {}
+        }
         // Read-modify-write for 8-bit I/O writes
         let current = self.io_read16(offset & !1);
         let new = if offset & 1 != 0 {
