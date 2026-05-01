@@ -33,17 +33,35 @@ impl Gba {
         // PC is 8 ahead: fetch at PC-8. During execute, PC = instr_addr+8.
         let pc = self.regs[15].wrapping_sub(8);
 
+        let was_sequential = self.fetch_sequential;
         // Instruction fetch cycles (S or N based on whether we just branched)
-        let fetch_cyc = if self.fetch_sequential {
+        let fetch_cyc = if was_sequential {
             self.insn_cycles_s(pc, 4)
         } else {
             self.insn_cycles_n(pc, 4)
         };
         self.stall_cycles += fetch_cyc;
 
+        self.insn_has_icycles = false;
         let instr = self.mem_read32(pc);
         self.branch_taken = false;
         self.arm_execute(instr);
+
+        // Prefetch Disable Bug (GBATek): when WAITCNT prefetch is disabled and the instruction
+        // is in GamePak ROM and has internal cycles (LDR/LDM/SWP/shift-by-reg/MUL), the opcode
+        // fetch changes from S to N.
+        if was_sequential && self.insn_has_icycles {
+            let prefetch_enabled = (self.waitcnt >> 14) & 1 != 0;
+            if !prefetch_enabled {
+                let region = pc >> 24;
+                if region >= 0x08 && region <= 0x0D {
+                    let n = self.insn_cycles_n(pc, 4);
+                    let s = self.insn_cycles_s(pc, 4);
+                    self.stall_cycles += n.saturating_sub(s);
+                }
+            }
+        }
+
         if !self.branch_taken {
             self.fetch_sequential = true;
             self.regs[15] = self.regs[15].wrapping_add(4);
@@ -306,6 +324,13 @@ impl Gba {
         let s = (instr >> 20) & 1 != 0;
         let opcode = (instr >> 21) & 0xF;
 
+        // Shift/rotate by register: 1I internal cycle (GBATek Prefetch Disable Bug applies)
+        let shift_by_reg = (instr >> 25) & 1 == 0 && (instr >> 4) & 1 != 0;
+        if shift_by_reg {
+            self.stall_cycles += 1;
+            self.insn_has_icycles = true;
+        }
+
         let (op2, new_carry) = self.arm_operand2(instr);
         let rn_val = self.reg(rn);
 
@@ -395,6 +420,7 @@ impl Gba {
         // Multiply timing: 1S + mI where m = 1..4 based on multiplier
         // Simplified: use 3I for MUL, 4I for MLA
         self.stall_cycles += if a { 4 } else { 3 };
+        self.insn_has_icycles = true;
 
         let result = self.reg(rm).wrapping_mul(self.reg(rs));
         let result = if a { result.wrapping_add(self.reg(rn)) } else { result };
@@ -414,6 +440,10 @@ impl Gba {
         let u = (instr >> 22) & 1 != 0;  // 0=unsigned, 1=signed (confusingly named U in docs)
         let a = (instr >> 21) & 1 != 0;  // accumulate
         let s = (instr >> 20) & 1 != 0;
+
+        // Simplified: 4I for MULL, 5I for MLAL
+        self.stall_cycles += if a { 5 } else { 4 };
+        self.insn_has_icycles = true;
 
         let result: u64;
         if !u {
@@ -449,11 +479,13 @@ impl Gba {
 
         if byte {
             self.stall_cycles += self.mem_cycles_n(addr, 1) + self.write_cycles_n(addr, 1) + 1;
+            self.insn_has_icycles = true;
             let mem = self.mem_read8(addr);
             self.mem_write8(addr, self.reg(rm) as u8);
             self.regs[rd as usize] = mem as u32;
         } else {
             self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + self.write_cycles_n(addr & !3, 4) + 1;
+            self.insn_has_icycles = true;
             let mem = self.mem_read32_rotate(addr);
             self.mem_write32(addr & !3, self.reg(rm));
             self.regs[rd as usize] = mem;
@@ -506,6 +538,7 @@ impl Gba {
                 _ => 0  // sh=0 shouldn't happen for halfword
             };
             self.stall_cycles += 1; // 1I internal cycle
+            self.insn_has_icycles = true;
             self.regs[rd as usize] = val;
         } else {
             // STRH (sh=1)
@@ -559,6 +592,7 @@ impl Gba {
                 self.mem_read32_rotate(addr)
             };
             self.stall_cycles += 1; // 1I internal cycle
+            self.insn_has_icycles = true;
             self.regs[rd as usize] = val;
             if rd == 15 {
                 // If loading into PC, flush pipeline
@@ -650,6 +684,7 @@ impl Gba {
                 }
             }
             self.stall_cycles += 1; // 1I
+            self.insn_has_icycles = true;
         } else {
             // STM: (n-1)S + 2N cycles
             let mut seq = false;
@@ -938,17 +973,35 @@ impl Gba {
         // PC is 4 ahead: fetch at PC-4. During execute, PC = instr_addr+4.
         let pc = self.regs[15].wrapping_sub(4);
 
+        let was_sequential = self.fetch_sequential;
         // Instruction fetch cycles (S or N based on whether we just branched)
-        let fetch_cyc = if self.fetch_sequential {
+        let fetch_cyc = if was_sequential {
             self.insn_cycles_s(pc, 2)
         } else {
             self.insn_cycles_n(pc, 2)
         };
         self.stall_cycles += fetch_cyc;
 
+        self.insn_has_icycles = false;
         let instr = self.mem_read16(pc) as u32;
         self.branch_taken = false;
         self.thumb_execute(instr);
+
+        // Prefetch Disable Bug (GBATek): when WAITCNT prefetch is disabled and the instruction
+        // is in GamePak ROM and has internal cycles (LDR/LDM/POP/shift-by-reg/MUL), the opcode
+        // fetch changes from S to N.
+        if was_sequential && self.insn_has_icycles {
+            let prefetch_enabled = (self.waitcnt >> 14) & 1 != 0;
+            if !prefetch_enabled {
+                let region = pc >> 24;
+                if region >= 0x08 && region <= 0x0D {
+                    let n = self.insn_cycles_n(pc, 2);
+                    let s = self.insn_cycles_s(pc, 2);
+                    self.stall_cycles += n.saturating_sub(s);
+                }
+            }
+        }
+
         if !self.branch_taken {
             self.fetch_sequential = true;
             self.regs[15] = self.regs[15].wrapping_add(2);
@@ -1167,24 +1220,30 @@ impl Gba {
         match op {
             0x0 => { result = rval & rsval; }  // AND
             0x1 => { result = rval ^ rsval; }  // EOR
-            0x2 => {  // LSL
+            0x2 => {  // LSL by register: 1I
                 let amt = rsval & 0xFF;
                 if amt == 0 { result = rval; }
                 else if amt < 32 { new_carry = ((rval >> (32 - amt)) & 1) != 0; result = rval << amt; }
                 else if amt == 32 { new_carry = (rval & 1) != 0; result = 0; }
                 else { new_carry = false; result = 0; }
+                self.stall_cycles += 1;
+                self.insn_has_icycles = true;
             }
-            0x3 => {  // LSR
+            0x3 => {  // LSR by register: 1I
                 let amt = rsval & 0xFF;
                 if amt == 0 { result = rval; }
                 else if amt < 32 { new_carry = ((rval >> (amt - 1)) & 1) != 0; result = rval >> amt; }
                 else if amt == 32 { new_carry = (rval >> 31) != 0; result = 0; }
                 else { new_carry = false; result = 0; }
+                self.stall_cycles += 1;
+                self.insn_has_icycles = true;
             }
-            0x4 => {  // ASR
+            0x4 => {  // ASR by register: 1I
                 let amt = (rsval & 0xFF).min(32);
                 if amt == 0 { result = rval; }
                 else { new_carry = ((rval >> (amt - 1)) & 1) != 0; result = ((rval as i32) >> amt) as u32; }
+                self.stall_cycles += 1;
+                self.insn_has_icycles = true;
             }
             0x5 => {  // ADC
                 let cin = if carry { 1 } else { 0 };
@@ -1196,10 +1255,12 @@ impl Gba {
                 let (r, c, v) = sub_with_flags(rval, rsval, cin);
                 result = r; new_carry = c; new_overflow = v;
             }
-            0x7 => {  // ROR
+            0x7 => {  // ROR by register: 1I
                 let amt = rsval & 0xFF;
                 if amt == 0 { result = rval; }
                 else { let a = amt & 31; new_carry = ((rval >> (a - 1)) & 1) != 0; result = rval.rotate_right(a); }
+                self.stall_cycles += 1;
+                self.insn_has_icycles = true;
             }
             0x8 => { result = rval & rsval; write = false; }  // TST
             0x9 => {  // NEG (0 - Rs)
@@ -1215,7 +1276,11 @@ impl Gba {
                 result = r; new_carry = c; new_overflow = v; write = false;
             }
             0xC => { result = rval | rsval; }  // ORR
-            0xD => { result = rval.wrapping_mul(rsval); }  // MUL
+            0xD => {  // MUL: 1I (simplified; full timing is mI where m depends on operand)
+                result = rval.wrapping_mul(rsval);
+                self.stall_cycles += 1;
+                self.insn_has_icycles = true;
+            }
             0xE => { result = rval & !rsval; }  // BIC
             0xF => { result = !rsval; }  // MVN
             _ => unreachable!()
@@ -1279,6 +1344,7 @@ impl Gba {
         let pc = self.regs[15] & !3;
         let addr = pc.wrapping_add(offset);
         self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + 1; // +1I
+        self.insn_has_icycles = true;
         self.regs[rd as usize] = self.mem_read32(addr);
     }
 
@@ -1298,10 +1364,12 @@ impl Gba {
             if l {
                 if b {
                     self.stall_cycles += self.mem_cycles_n(addr, 1) + 1;
+                    self.insn_has_icycles = true;
                     let val = self.mem_read8(addr) as u32;
                     self.regs[rd as usize] = val;
                 } else {
                     self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + 1;
+                    self.insn_has_icycles = true;
                     let val = self.mem_read32_rotate(addr);
                     self.regs[rd as usize] = val;
                 }
@@ -1329,18 +1397,22 @@ impl Gba {
             } else if s && !h {
                 // LDRSB
                 self.stall_cycles += self.mem_cycles_n(addr, 1) + 1;
+                self.insn_has_icycles = true;
                 self.regs[rd as usize] = self.mem_read8(addr) as i8 as i32 as u32;
             } else if !s && h {
                 // LDRH
                 self.stall_cycles += self.mem_cycles_n(addr & !1, 2) + 1;
+                self.insn_has_icycles = true;
                 self.regs[rd as usize] = self.mem_read16(addr & !1) as u32;
             } else {
                 // LDRSH
                 if addr & 1 != 0 {
                     self.stall_cycles += self.mem_cycles_n(addr, 1) + 1;
+                    self.insn_has_icycles = true;
                     self.regs[rd as usize] = self.mem_read8(addr) as i8 as i32 as u32;
                 } else {
                     self.stall_cycles += self.mem_cycles_n(addr & !1, 2) + 1;
+                    self.insn_has_icycles = true;
                     self.regs[rd as usize] = self.mem_read16(addr & !1) as i16 as i32 as u32;
                 }
             }
@@ -1362,9 +1434,11 @@ impl Gba {
         if l {
             if b {
                 self.stall_cycles += self.mem_cycles_n(addr, 1) + 1;
+                self.insn_has_icycles = true;
                 self.regs[rd as usize] = self.mem_read8(addr) as u32;
             } else {
                 self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + 1;
+                self.insn_has_icycles = true;
                 self.regs[rd as usize] = self.mem_read32_rotate(addr);
             }
         } else {
@@ -1388,6 +1462,7 @@ impl Gba {
 
         if l {
             self.stall_cycles += self.mem_cycles_n(addr & !1, 2) + 1;
+            self.insn_has_icycles = true;
             self.regs[rd as usize] = self.mem_read16(addr & !1) as u32;
         } else {
             self.stall_cycles += self.write_cycles_n(addr & !1, 2);
@@ -1404,6 +1479,7 @@ impl Gba {
 
         if l {
             self.stall_cycles += self.mem_cycles_n(addr & !3, 4) + 1;
+            self.insn_has_icycles = true;
             self.regs[rd as usize] = self.mem_read32_rotate(addr);
         } else {
             self.stall_cycles += self.write_cycles_n(addr & !3, 4);
@@ -1457,6 +1533,7 @@ impl Gba {
                 self.fetch_sequential = false;
             }
             self.stall_cycles += 1; // 1I
+            self.insn_has_icycles = true;
             self.regs[13] = sp;
         } else {
             // PUSH
@@ -1504,6 +1581,7 @@ impl Gba {
                 }
             }
             self.stall_cycles += 1; // 1I
+            self.insn_has_icycles = true;
         } else {
             let mut seq = false;
             for i in 0..8u32 {

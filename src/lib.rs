@@ -140,6 +140,7 @@ pub(crate) struct Gba {
     pub stall_cycles: u32,          // cycles consumed by current instruction
     pub cpu_cycles_remaining: i32,  // cycles CPU is stalled (waiting for memory)
     pub fetch_sequential: bool,     // true if last code fetch was sequential (no branch)
+    pub insn_has_icycles: bool,     // set by handlers that add 1I; used for Prefetch Disable Bug
 }
 
 #[derive(Clone)]
@@ -324,6 +325,7 @@ impl Gba {
             stall_cycles: 0,
             cpu_cycles_remaining: 0,
             fetch_sequential: false,
+            insn_has_icycles: false,
         };
 
         // Load BIOS stub
