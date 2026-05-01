@@ -1182,4 +1182,217 @@ mod tests {
         println!("Copy loop total entry: {}", copy_loop_iters);
         println!("VRAM fill loop total entry: {}", vram_fill_iters);
     }
+
+
+    #[test]
+    fn dump_trogdor_frames() {
+        dump_frames("/task/dev-roms/trogdor.gba", "/tmp/my_trog", 60);
+        println!("Done");
+    }
+
+    #[test]
+    fn dump_xniq_frames() {
+        dump_frames("/task/dev-roms/xniq.gba", "/tmp/my_xniq", 60);
+        println!("Done");
+    }
+
+    #[test]
+    fn dump_meteorain_frames() {
+        dump_frames("/task/dev-roms/meteorain.gba", "/tmp/my_met", 60);
+        println!("Done");
+    }
+
+    #[test]
+    fn test_xniq_init() {
+        let mut gba = make_gba("/task/dev-roms/xniq.gba");
+        let mut done = false;
+        for cycle in 0..(280896u64 * 200) as u32 {
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc {
+                let is_thumb = (gba.cpsr & 0x20) != 0;
+                let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+                println!("Cycle {} (frame {}): DISPCNT 0x{:04X}->0x{:04X} PC=0x{:08X}",
+                    cycle, cycle/280896, old_dc, gba.dispcnt, pc);
+                if (old_dc & 0x80) != 0 && (gba.dispcnt & 0x80) == 0 {
+                    println!("Forced blank CLEARED at cycle {} (frame {})", cycle, cycle/280896);
+                    done = true;
+                    break;
+                }
+            }
+        }
+        if !done {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            println!("Forced blank NEVER cleared! Final DISPCNT=0x{:04X} PC=0x{:08X}", gba.dispcnt, pc);
+            // Check if halted
+            println!("Halted: {}", gba.halted);
+            println!("IME={} IE=0x{:04X} IF=0x{:04X}", gba.ime, gba.ie, gba.if_);
+        }
+    }
+
+    #[test]
+    fn test_xniq_loop() {
+        let mut gba = make_gba("/task/dev-roms/xniq.gba");
+        // Run 1M cycles, track PC distribution
+        let mut pc_counts = std::collections::HashMap::new();
+        let mut prev_dispcnt = gba.dispcnt;
+        for cycle in 0..2_000_000u32 {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            *pc_counts.entry(pc).or_insert(0u32) += 1;
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc {
+                println!("Cycle {}: DISPCNT 0x{:04X}->0x{:04X} PC=0x{:08X}",
+                    cycle, old_dc, gba.dispcnt, pc);
+            }
+            if gba.halted && !gba.halted {
+                println!("CPU halted at cycle {}, PC=0x{:08X}", cycle, pc);
+            }
+        }
+        // Print top 10 hottest PCs
+        let mut sorted: Vec<_> = pc_counts.iter().collect();
+        sorted.sort_by_key(|&(_, &c)| std::cmp::Reverse(c));
+        println!("Top PCs by cycle count:");
+        for (pc, count) in sorted.iter().take(15) {
+            let is_thumb = gba.mem_read16(**pc) & 0x8000 != 0;
+            println!("  0x{:08X}: {} cycles", pc, count);
+        }
+        let is_thumb = (gba.cpsr & 0x20) != 0;
+        let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+        println!("Final PC=0x{:08X} DISPCNT=0x{:04X} halted={}", pc, gba.dispcnt, gba.halted);
+        println!("IME={} IE=0x{:04X} IF=0x{:04X}", gba.ime, gba.ie, gba.if_);
+    }
+
+    #[test]
+    fn test_xniq_loop_detail() {
+        let mut gba = make_gba("/task/dev-roms/xniq.gba");
+        let loop1_addr = 0x08003E66u32;
+        let loop2_addr = 0x08000150u32;
+        let mut in_loop1 = false;
+        let mut in_loop2 = false;
+        let mut loops_entered = 0u32;
+        
+        for cycle in 0..3_000_000u32 {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            
+            if is_thumb && pc == loop1_addr && !in_loop1 {
+                in_loop1 = true;
+                loops_entered += 1;
+                println!("Cycle {}: Entering loop1(0x08003E66) R0=0x{:08X} R1={} R2=0x{:08X}",
+                    cycle, gba.regs[0], gba.regs[1], gba.regs[2]);
+            } else if in_loop1 && !(is_thumb && (pc == loop1_addr || pc == 0x08003E68 || pc == 0x08003E6A)) {
+                in_loop1 = false;
+                println!("Cycle {}: Leaving loop1, final R0=0x{:08X}", cycle, gba.regs[0]);
+            }
+            
+            if is_thumb && pc == loop2_addr && !in_loop2 {
+                in_loop2 = true;
+                loops_entered += 1;
+                println!("Cycle {}: Entering loop2(0x08000150) R0=0x{:08X} R1={} R2=0x{:08X}",
+                    cycle, gba.regs[0], gba.regs[1], gba.regs[2]);
+            } else if in_loop2 && !(is_thumb && (pc == loop2_addr || pc == 0x08000152 || pc == 0x08000154)) {
+                in_loop2 = false;
+                println!("Cycle {}: Leaving loop2, final R0=0x{:08X}", cycle, gba.regs[0]);
+            }
+            
+            let old_dc = gba.dispcnt;
+            gba.tick_one_cycle();
+            if gba.dispcnt != old_dc {
+                println!("Cycle {}: DISPCNT 0x{:04X}->0x{:04X}", cycle, old_dc, gba.dispcnt);
+            }
+            
+            if loops_entered > 10 { break; }
+        }
+        let is_thumb = (gba.cpsr & 0x20) != 0;
+        let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+        println!("Final PC=0x{:08X} loops_entered={}", pc, loops_entered);
+    }
+
+    #[test]
+    fn test_xniq_before_loop1() {
+        let mut gba = make_gba("/task/dev-roms/xniq.gba");
+        let loop1_addr = 0x08003E66u32;
+        let mut trace_start = false;
+        
+        for cycle in 0..1_000_000u32 {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            
+            // Start tracing 500 cycles before loop1 entry
+            if !trace_start && is_thumb && pc == loop1_addr {
+                trace_start = true;
+                println!("Loop1 entered at cycle {}: R0={:08X} R1={} R2={:08X}",
+                    cycle, gba.regs[0], gba.regs[1], gba.regs[2]);
+                break;
+            }
+            
+            gba.tick_one_cycle();
+        }
+        
+        // Now run again from scratch and trace the 100 instructions before loop1 entry
+        let mut gba2 = make_gba("/task/dev-roms/xniq.gba");
+        let mut insn_count = 0u32;
+        let mut insns_before_loop: Vec<(u32, u32, [u32; 4])> = Vec::new();
+        let mut found_loop = false;
+        
+        for _cycle in 0..1_000_000u32 {
+            let is_thumb = (gba2.cpsr & 0x20) != 0;
+            let pc = gba2.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            let instr = if is_thumb { gba2.mem_read16(pc) as u32 } else { gba2.mem_read32(pc) };
+            
+            // Track last 100 instructions
+            if is_thumb && (pc == loop1_addr || pc == 0x08003E68 || pc == 0x08003E6A) {
+                if !found_loop {
+                    found_loop = true;
+                    println!("100 instructions before loop1:");
+                    for (addr, i, regs) in insns_before_loop.iter().rev().take(100).rev() {
+                        println!("  {:08X}: {:04X}  r0={:08X} r1={:08X} r2={:08X} r3={:08X}",
+                            addr, i, regs[0], regs[1], regs[2], regs[3]);
+                    }
+                    println!("Loop1 R1={}", gba2.regs[1]);
+                }
+            } else if is_thumb {
+                insns_before_loop.push((pc, instr, [gba2.regs[0], gba2.regs[1], gba2.regs[2], gba2.regs[3]]));
+                if insns_before_loop.len() > 200 {
+                    insns_before_loop.remove(0);
+                }
+            }
+            
+            if found_loop { break; }
+            gba2.tick_one_cycle();
+        }
+    }
+
+    #[test]
+    fn test_xniq_trace_all() {
+        let mut gba = make_gba("/task/dev-roms/xniq.gba");
+        let loop1_addr = 0x08003E66u32;
+        let mut insns: Vec<(u32, u32, bool, [u32; 5])> = Vec::new(); // (pc, instr, is_thumb, [r0,r1,r2,r3,r14])
+        let mut found = false;
+        
+        for _cycle in 0..1_000_000u32 {
+            let is_thumb = (gba.cpsr & 0x20) != 0;
+            let pc = gba.regs[15].wrapping_sub(if is_thumb { 4 } else { 8 });
+            let instr = if is_thumb { gba.mem_read16(pc) as u32 } else { gba.mem_read32(pc) };
+            
+            if is_thumb && pc == loop1_addr && !found {
+                found = true;
+                println!("Loop1 at cycle _: R1={}", gba.regs[1]);
+                println!("Last 100 instructions:");
+                let start = if insns.len() > 100 { insns.len() - 100 } else { 0 };
+                for (addr, i, thumb, regs) in &insns[start..] {
+                    println!("  {:08X}: {:08X} {} r0={:08X} r1={:08X} r2={:08X} r3={:08X} lr={:08X}",
+                        addr, i, if *thumb {"T"} else {"A"}, regs[0], regs[1], regs[2], regs[3], regs[4]);
+                }
+                break;
+            }
+            
+            insns.push((pc, instr, is_thumb, [gba.regs[0], gba.regs[1], gba.regs[2], gba.regs[3], gba.regs[14]]));
+            if insns.len() > 300 { insns.remove(0); }
+            gba.tick_one_cycle();
+        }
+    }
 }
