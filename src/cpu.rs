@@ -1575,7 +1575,9 @@ impl Gba {
                 let cyc = if seq { self.write_cycles_s(addr & !3, 4) } else { self.write_cycles_n(addr & !3, 4) };
                 self.stall_cycles += cyc;
                 self.mem_write32(addr & !3, self.regs[14]);
+                addr = addr.wrapping_add(4);
             }
+            let _ = addr;
         }
     }
 
