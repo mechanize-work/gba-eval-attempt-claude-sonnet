@@ -48,8 +48,14 @@ impl Gba {
         self.branch_taken = false;
         self.arm_execute(instr);
 
+        // Prefetch Disable Bug: instructions with 1I cycles stall the prefetch buffer,
+        // adding 1 extra cycle when prefetch is enabled and executing from ROM.
+        let prefetch_on = (self.waitcnt >> 14) & 1 != 0;
+        if self.insn_has_icycles && prefetch_on && (pc >> 24) >= 0x08 {
+            self.stall_cycles += 1;
+        }
+
         if !self.branch_taken {
-            let prefetch_on = (self.waitcnt >> 14) & 1 != 0;
             self.fetch_sequential = if prefetch_on { true } else { !self.rom_data_accessed };
             self.regs[15] = self.regs[15].wrapping_add(4);
         } else {
@@ -978,8 +984,14 @@ impl Gba {
         self.branch_taken = false;
         self.thumb_execute(instr);
 
+        // Prefetch Disable Bug: instructions with 1I cycles stall the prefetch buffer,
+        // adding 1 extra cycle when prefetch is enabled and executing from ROM.
+        let prefetch_on = (self.waitcnt >> 14) & 1 != 0;
+        if self.insn_has_icycles && prefetch_on && (pc >> 24) >= 0x08 {
+            self.stall_cycles += 1;
+        }
+
         if !self.branch_taken {
-            let prefetch_on = (self.waitcnt >> 14) & 1 != 0;
             self.fetch_sequential = if prefetch_on { true } else { !self.rom_data_accessed };
             self.regs[15] = self.regs[15].wrapping_add(2);
         } else {

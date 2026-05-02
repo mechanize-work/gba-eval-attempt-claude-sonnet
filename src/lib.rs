@@ -403,7 +403,7 @@ impl Gba {
         self.ie = 0; self.if_ = 0; self.ime = 0;
         self.keyinput = 0x03FF;
         self.keycnt = 0;
-        self.waitcnt = 0x0000; self.memcnt = 0x0D000020; self.postflg = 1; self.haltcnt = 0;
+        self.waitcnt = 0x4317; self.memcnt = 0x0D000020; self.postflg = 1; self.haltcnt = 0;
         self.cycles = 0; self.frame_cycles = 0;
         self.dma_pending = 0;
         self.branch_taken = false;

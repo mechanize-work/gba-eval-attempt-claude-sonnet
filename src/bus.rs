@@ -90,20 +90,25 @@ impl Gba {
         }
     }
 
-    // Non-sequential (N) instruction fetch cycles (prefetch can serve as S for ROM)
-    // N-cycle instruction fetch (same as data N for ROM - no special prefetch speedup for N)
+    // Non-sequential (N) instruction fetch cycles
+    // With prefetch enabled, N-fetch served from prefetch buffer = 1 cycle (same as S)
     pub(crate) fn insn_cycles_n(&self, addr: u32, width: u8) -> u32 {
-        self.mem_cycles_n(addr, width)
+        let prefetch = (self.waitcnt >> 14) & 1 != 0;
+        if prefetch {
+            self.insn_cycles_s(addr, width)
+        } else {
+            self.mem_cycles_n(addr, width)
+        }
     }
 
-    // Write cycles: no write buffer - EWRAM writes take full N cycles
+    // Write cycles: EWRAM has write buffer — CPU does not stall for EWRAM writes
     pub(crate) fn write_cycles_n(&self, addr: u32, width: u8) -> u32 {
-        self.mem_cycles_n(addr, width)
+        if (addr >> 24) == 0x02 { 0 } else { self.mem_cycles_n(addr, width) }
     }
 
-    // Write cycles sequential: no write buffer - EWRAM writes take full S cycles
+    // Write cycles sequential: EWRAM has write buffer — CPU does not stall for EWRAM writes
     pub(crate) fn write_cycles_s(&self, addr: u32, width: u8) -> u32 {
-        self.mem_cycles_s(addr, width)
+        if (addr >> 24) == 0x02 { 0 } else { self.mem_cycles_s(addr, width) }
     }
 
     // Add cycles for a data access (N cycles, non-sequential)
