@@ -69,35 +69,25 @@ impl Gba {
         }
     }
 
-    // Sequential (S) instruction fetch cycles (prefetch buffer applies to ROM)
+    // Sequential (S) instruction fetch cycles
+    // ROM instruction fetches always take 1 cycle per 16-bit access (GBA hardware model)
     pub(crate) fn insn_cycles_s(&self, addr: u32, width: u8) -> u32 {
-        let wc = self.waitcnt;
-        let prefetch = (wc >> 14) & 1 != 0;
         match addr >> 24 {
-            0x08 | 0x09 => {
-                let s = if prefetch { 1 } else { [2u32, 1][((wc >> 4) & 1) as usize] };
-                if width == 4 { s + s } else { s }
-            }
-            0x0A | 0x0B => {
-                let s = if prefetch { 1 } else { [4u32, 1][((wc >> 7) & 1) as usize] };
-                if width == 4 { s + s } else { s }
-            }
-            0x0C | 0x0D => {
-                let s = if prefetch { 1 } else { [8u32, 1][((wc >> 10) & 1) as usize] };
-                if width == 4 { s + s } else { s }
+            0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D => {
+                if width == 4 { 2 } else { 1 }
             }
             _ => self.mem_cycles_s(addr, width),
         }
     }
 
     // Non-sequential (N) instruction fetch cycles
-    // With prefetch enabled, N-fetch served from prefetch buffer = 1 cycle (same as S)
+    // ROM instruction fetches always take 1 cycle per 16-bit access (GBA hardware model)
     pub(crate) fn insn_cycles_n(&self, addr: u32, width: u8) -> u32 {
-        let prefetch = (self.waitcnt >> 14) & 1 != 0;
-        if prefetch {
-            self.insn_cycles_s(addr, width)
-        } else {
-            self.mem_cycles_n(addr, width)
+        match addr >> 24 {
+            0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D => {
+                if width == 4 { 2 } else { 1 }
+            }
+            _ => self.mem_cycles_n(addr, width),
         }
     }
 
